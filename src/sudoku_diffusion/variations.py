@@ -65,7 +65,7 @@ TrainingConfig = SFTConfig | GRPOConfig
 
 MODELS: dict[str, ModelConfig] = {
     "tiny": ModelConfig(name="tiny", d_model=32, n_layers=2, n_heads=2, d_ff=64),
-    "base": ModelConfig(name="base", d_model=128, n_layers=6, n_heads=4, d_ff=512),
+    "base": ModelConfig(name="base", d_model=192, n_layers=8, n_heads=4, d_ff=768),
 }
 
 TRAININGS: dict[str, TrainingConfig] = {
@@ -73,7 +73,12 @@ TRAININGS: dict[str, TrainingConfig] = {
         name="smoke", steps=50, batch_size=32, lr=3e-4, warmup_steps=5, val_every=25
     ),
     "sft": SFTConfig(
-        name="sft", steps=5000, batch_size=256, lr=1e-3, warmup_steps=100, val_every=200
+        name="sft",
+        steps=10000,
+        batch_size=256,
+        lr=1e-3,
+        warmup_steps=100,
+        val_every=500,
     ),
     "grpo-smoke": GRPOConfig(
         name="grpo-smoke",
@@ -88,11 +93,11 @@ TRAININGS: dict[str, TrainingConfig] = {
     ),
     "grpo": GRPOConfig(
         name="grpo",
-        steps=2000,
+        steps=5000,
         lr=2e-5,
         warmup_steps=10,
         init_from_training="sft",
-        group_size=16,
+        group_size=8,
         puzzles_per_batch=32,
         log_every=50,
         val_every=25,
