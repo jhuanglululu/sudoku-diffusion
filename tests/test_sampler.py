@@ -1,7 +1,9 @@
+import math
+
 import torch
 
 from sudoku_diffusion.data import MASK
-from sudoku_diffusion.sampler import Rollout, action_logprob, sample
+from sudoku_diffusion.sampler import Rollout, _digit_probs, action_logprob, sample
 
 
 class Rigged(torch.nn.Module):
@@ -83,6 +85,49 @@ def test_action_logprob_matches_manual():
     lp = action_logprob(model, rolls)
     assert torch.isfinite(lp).all()
     assert torch.allclose(lp[0], _manual_logprob(logits, rolls[0], 1.0), atol=1e-5)
+
+
+def test_commit_selection_is_topk_of_masked():
+    # tie-free random logits; per recorded step, the committed set must be
+    # masked-only, sized max(1, ceil(frac * n_masked)), and dominate every
+    # non-committed masked cell in confidence
+    torch.manual_seed(1)
+    logits = torch.randn(16, 5)
+    conf = _digit_probs(logits, 1.0).max(-1).values
+    frac = 0.35
+    puz = torch.zeros(3, 16, dtype=torch.long)
+    puz[1, :4] = torch.tensor([1, 2, 3, 4])
+    puz[2, 0] = 2
+    _, _, rolls, _ = sample(Rigged(logits), puz, max_steps=6, commit_frac=frac, record=True)
+    checked = 0
+    for r in rolls:
+        for t in range(len(r.states)):
+            masked = r.states[t] == MASK
+            commit = r.commit_sites[t]
+            n_masked = int(masked.sum())
+            if n_masked == 0:
+                assert not commit.any()
+                continue
+            assert (commit & ~masked).sum() == 0
+            assert int(commit.sum()) == max(1, math.ceil(frac * n_masked))
+            open_conf = conf[masked & ~commit]
+            if commit.any() and open_conf.numel():
+                assert conf[commit].min() >= open_conf.max()
+            checked += 1
+    assert checked > 0
+
+
+def test_action_logprob_multiple_rollouts():
+    torch.manual_seed(2)
+    logits = torch.randn(16, 5)
+    model = Rigged(logits)
+    puz = torch.zeros(2, 16, dtype=torch.long)
+    puz[1, :4] = torch.tensor([1, 2, 3, 4])  # different clue counts -> different rollouts
+    gen = torch.Generator().manual_seed(1)
+    _, _, rolls, _ = sample(model, puz, max_steps=5, commit_frac=0.5, temperature=1.0, generator=gen, record=True)
+    lp = action_logprob(model, rolls)
+    for i in range(2):
+        assert torch.allclose(lp[i], _manual_logprob(logits, rolls[i], 1.0), atol=1e-5)
 
 
 def test_action_logprob_applies_temperature():

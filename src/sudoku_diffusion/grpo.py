@@ -101,10 +101,11 @@ def train_grpo(model_name: str, training_name: str, seed: int) -> None:
             rewards[i] = rw
             solves += ok
         adv = group_advantages(rewards.view(P, G)).view(-1).to(device)
-        with torch.no_grad():
-            old_lp = action_logprob(model, rollouts)
-
         new_lp = action_logprob(model, rollouts)
+        # single gradient step per rollout batch: the rollout policy IS the
+        # current policy, so old_lp == new_lp — skip its forward pass. If inner
+        # PPO epochs are ever added, compute old_lp before the first update.
+        old_lp = new_lp.detach()
         ratio = torch.exp(new_lp - old_lp)
         clipped = torch.clamp(ratio, 1 - cfg.clip_eps, 1 + cfg.clip_eps)
         loss = -torch.min(ratio * adv, clipped * adv).mean()

@@ -15,7 +15,6 @@ recompute the trajectory log-probability under the current policy with grad.
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass, field
 
 import torch
@@ -52,12 +51,14 @@ def sample(
     temperature: float = 0.0,
     generator: torch.Generator | None = None,
     record: bool = False,
+    track_trajectories: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, list[Rollout], list[list[torch.Tensor]]]:
     """Run the sampler on a batch of puzzles (B, 16).
 
     Returns (final_boards, steps_used, rollouts, trajectories).
-    `rollouts` is empty unless record=True; `trajectories[b]` is the list of
-    board states of puzzle b including the final board (for the demo).
+    `rollouts` is empty unless record=True; `trajectories` is empty unless
+    track_trajectories=True, else `trajectories[b]` is the list of board
+    states of puzzle b including the final board (for the demo).
     """
     device = puzzles.device
     boards = puzzles.clone()
@@ -70,7 +71,11 @@ def sample(
     ]
     steps_used = torch.full((B,), max_steps, dtype=torch.long, device=device)
     active = torch.ones(B, dtype=torch.bool, device=device)
-    trajectories: list[list[torch.Tensor]] = [[boards[b].clone()] for b in range(B)]
+    trajectories: list[list[torch.Tensor]] = (
+        [[boards[b].clone()] for b in range(B)] if track_trajectories else []
+    )
+    # per-step batched records; sliced into per-board Rollout lists at the end
+    rec: list[tuple[torch.Tensor, ...]] = []
 
     for step in range(max_steps):
         if not active.any():
@@ -93,15 +98,16 @@ def sample(
         masked = (prev == MASK) & active[:, None]
         dprobs = _digit_probs(logits, temperature if stochastic else 1.0)
         conf = dprobs.max(-1).values.masked_fill(~masked, -1.0)
-        commit = torch.zeros_like(masked)
+        # per-board k = max(1, ceil(commit_frac * n_masked)), 0 if nothing masked;
+        # commit the cells whose confidence rank is below k. Non-masked cells sit
+        # at conf -1.0 < any probability, so ranks < n_masked are all masked cells.
+        # k in float64 so the ceil matches math.ceil at boundary values.
+        n_masked = masked.sum(-1)
+        k = (n_masked.double() * commit_frac).ceil().long().clamp(min=1)
+        k = torch.where(n_masked > 0, k, torch.zeros_like(k))
+        ranks = conf.argsort(-1, descending=True).argsort(-1)
+        commit = ranks < k[:, None]
         chosen_tok = torch.zeros_like(boards)
-        for b in range(B):
-            n_masked = int(masked[b].sum())
-            if n_masked == 0:
-                continue
-            k = max(1, math.ceil(commit_frac * n_masked))
-            idx = conf[b].topk(k).indices
-            commit[b, idx] = True
         if stochastic:
             flat = dprobs[commit]
             tok = torch.multinomial(flat, 1, generator=generator).squeeze(-1) + 1
@@ -111,22 +117,29 @@ def sample(
         boards[commit] = chosen_tok[commit]
 
         if record:
-            for b in torch.nonzero(active).flatten().tolist():
-                r = rollouts[b]
-                r.states.append(prev[b].clone())
-                r.remask_sites.append(filled[b].clone())
-                r.remask_taken.append(remask[b].clone())
-                r.commit_sites.append(commit[b].clone())
-                r.commit_tokens.append(chosen_tok[b].clone())
+            rec.append((active.clone(), prev, filled, remask, commit, chosen_tok))
 
         # --- termination: full and unchanged
         stable = ((boards != MASK).all(-1)) & (boards == prev).all(-1) & active
         steps_used[stable] = step + 1
         active = active & ~stable
-        for b in range(B):
-            if not (boards[b] == trajectories[b][-1]).all():
-                trajectories[b].append(boards[b].clone())
+        if track_trajectories:
+            for b in range(B):
+                if not (boards[b] == trajectories[b][-1]).all():
+                    trajectories[b].append(boards[b].clone())
 
+    if record:
+        act = torch.stack([a for a, *_ in rec]).cpu().tolist() if rec else []
+        for b in range(B):
+            r = rollouts[b]
+            for t, (_, prev, filled, remask, commit, chosen_tok) in enumerate(rec):
+                if not act[t][b]:
+                    break  # once inactive, a board never records again
+                r.states.append(prev[b])
+                r.remask_sites.append(filled[b])
+                r.remask_taken.append(remask[b])
+                r.commit_sites.append(commit[b])
+                r.commit_tokens.append(chosen_tok[b])
     for b in range(B):
         rollouts[b].final_board = boards[b].clone()
         rollouts[b].steps_used = int(steps_used[b])
@@ -136,32 +149,39 @@ def sample(
 
 def action_logprob(model: torch.nn.Module, rollouts: list[Rollout]) -> torch.Tensor:
     """Total log-probability of each rollout's recorded actions under the
-    current model. Differentiable. Returns (B,)."""
+    current model. Differentiable. Returns (B,).
+
+    Fully batched: all recorded steps of all rollouts go through one forward
+    and a handful of tensor ops, so the autograd graph stays small."""
     device = next(model.parameters()).device
-    states, owner = [], []
+    states, sites, taken, csites, ctoks, owner, temps = [], [], [], [], [], [], []
     for i, r in enumerate(rollouts):
         states += r.states
+        sites += r.remask_sites
+        taken += r.remask_taken
+        csites += r.commit_sites
+        ctoks += r.commit_tokens
         owner += [i] * len(r.states)
+        temps += [max(r.temperature, 1e-6)] * len(r.states)
     if not states:
         return torch.zeros(len(rollouts), device=device)
-    logits = model(torch.stack(states).to(device))
+    sites_t = torch.stack(sites).to(device)
+    taken_t = torch.stack(taken).to(device)
+    commit = torch.stack(csites).to(device)                       # (N, 16) bool
+    tokens = torch.stack(ctoks).to(device)                        # (N, 16) long
+    temp = torch.tensor(temps, device=device)[:, None, None]      # (N, 1, 1)
+
+    logits = model(torch.stack(states).to(device))                # (N, 16, 5)
     logp = torch.log_softmax(logits, dim=-1)
-    p = logp.exp()
-    total = torch.zeros(len(rollouts), device=device)
-    row = 0
-    for i, r in enumerate(rollouts):
-        for t in range(len(r.states)):
-            lp, pr = logp[row], p[row]
-            sites, taken = r.remask_sites[t], r.remask_taken[t]
-            # remask decision: log p(MASK) if taken, log(1 - p(MASK)) otherwise
-            keep = sites & ~taken
-            total[i] = total[i] + lp[taken, MASK].sum()
-            total[i] = total[i] + torch.log1p(-pr[keep, MASK].clamp(max=1 - 1e-6)).sum()
-            # committed digits: renormalized over digits, at the rollout's temperature
-            c = r.commit_sites[t]
-            if c.any():
-                t_ = max(r.temperature, 1e-6)
-                dlp = torch.log_softmax(logits[row][c][:, 1:] / t_, dim=-1)
-                total[i] = total[i] + dlp.gather(1, (r.commit_tokens[t][c] - 1)[:, None]).sum()
-            row += 1
-    return total
+    p_mask = logp[..., MASK].exp()
+    # remask decision: log p(MASK) if taken, log(1 - p(MASK)) otherwise
+    keep = sites_t & ~taken_t
+    per_state = (logp[..., MASK] * taken_t).sum(-1)
+    per_state = per_state + (torch.log1p(-p_mask.clamp(max=1 - 1e-6)) * keep).sum(-1)
+    # committed digits: renormalized over digits, at the rollout's temperature
+    dlp = torch.log_softmax(logits[..., 1:] / temp, dim=-1)       # (N, 16, 4)
+    digit_lp = dlp.gather(-1, (tokens - 1).clamp(min=0)[..., None]).squeeze(-1)
+    per_state = per_state + (digit_lp * commit).sum(-1)
+
+    owner_t = torch.tensor(owner, device=device)
+    return torch.zeros(len(rollouts), device=device).index_add(0, owner_t, per_state)
