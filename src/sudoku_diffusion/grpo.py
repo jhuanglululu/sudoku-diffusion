@@ -19,7 +19,7 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-from .data import CELLS, SPLIT_SEED, orbit_split, solved, validity_score
+from .data import SPLIT_SEED, orbit_split, random_puzzle, solved, validity_score
 from .model import SudokuDenoiser, get_device
 from .runs import Record, load_checkpoint, save_checkpoint, seed_all
 from .sampler import action_logprob, sample
@@ -49,12 +49,8 @@ def sample_puzzles(train_sols: np.ndarray, cfg: GRPOConfig, rng: np.random.Gener
     out = []
     for _ in range(cfg.puzzles_per_batch):
         n_clues = int(rng.choice(cfg.clue_counts))
-        puz = np.zeros(CELLS, dtype=train_sols.dtype)
-        if n_clues:
-            sol = train_sols[rng.integers(len(train_sols))]
-            keep = rng.choice(CELLS, size=n_clues, replace=False)
-            puz[keep] = sol[keep]
-        out.append(puz)
+        sol = train_sols[rng.integers(len(train_sols))]
+        out.append(random_puzzle(sol, n_clues, rng))
     return np.stack(out)
 
 
@@ -87,9 +83,8 @@ def train_grpo(model_name: str, training_name: str, seed: int) -> None:
         puzzles = sample_puzzles(train_sols, cfg, rng)
         batch = torch.from_numpy(np.repeat(puzzles, G, axis=0)).long().to(device)  # (P*G, 16)
         _, steps_used, rollouts, _ = sample(
-            model, batch, cfg.max_sample_steps, cfg.commit_frac,
+            model, batch, cfg.max_sample_steps,
             temperature=cfg.temperature, generator=gen, record=True,
-            commit_threshold=cfg.commit_threshold,
         )
         rewards = torch.zeros(P * G)
         solves = 0

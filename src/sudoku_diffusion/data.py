@@ -8,8 +8,6 @@ Boards are numpy int arrays of shape (16,), row-major. Tokens: 0 = MASK,
 from __future__ import annotations
 
 import itertools
-import json
-from pathlib import Path
 
 import numpy as np
 
@@ -139,6 +137,17 @@ def orbit_split(rng: np.random.Generator, eval_fraction: float = 1 / 6) -> tuple
 
 
 # ------------------------------------------------------------------- puzzles
+def random_puzzle(solution: np.ndarray, n_clues: int, rng: np.random.Generator) -> np.ndarray:
+    """Keep n_clues random cells of a solution. No uniqueness guarantee
+    (below 4 clues no unique 4x4 puzzle exists) — fine wherever the outcome
+    is verified with solved() instead of compared to one target."""
+    puzzle = np.zeros(CELLS, dtype=solution.dtype)
+    if n_clues:
+        keep = rng.choice(CELLS, size=n_clues, replace=False)
+        puzzle[keep] = solution[keep]
+    return puzzle
+
+
 def make_puzzle(solution: np.ndarray, n_clues: int, rng: np.random.Generator) -> np.ndarray | None:
     """Remove cells from a solution down to n_clues, keeping uniqueness.
     Returns None if no unique puzzle with exactly n_clues was found."""
@@ -170,40 +179,3 @@ def validity_score(board: np.ndarray) -> float:
     )
 
 
-def generate_eval_set(
-    path: Path, seed: int = 12345, per_clue: int = 100, clue_counts: tuple[int, ...] = (0, 4, 5, 6, 7, 8)
-) -> int:
-    """Write a fixed eval set of distinct unique-solution puzzles from
-    eval-orbit solutions (the orbit split always uses SPLIT_SEED; `seed` only
-    drives puzzle generation). n_clues=0 emits a single empty board (greedy
-    eval is deterministic)."""
-    rng = np.random.default_rng(seed)
-    _, eval_sols = orbit_split(np.random.default_rng(SPLIT_SEED))
-    path.parent.mkdir(parents=True, exist_ok=True)
-    seen: set[bytes] = set()
-    n = 0
-    with path.open("w") as f:
-        for n_clues in clue_counts:
-            if n_clues == 0:
-                f.write(json.dumps({"puzzle": [0] * CELLS, "solution": None, "n_clues": 0}) + "\n")
-                n += 1
-                continue
-            made = 0
-            attempts = 0
-            while made < per_clue and attempts < per_clue * 50:
-                attempts += 1
-                sol = eval_sols[rng.integers(len(eval_sols))]
-                puz = make_puzzle(sol, n_clues, rng)
-                if puz is None or puz.tobytes() in seen:
-                    continue
-                seen.add(puz.tobytes())
-                f.write(
-                    json.dumps({"puzzle": puz.tolist(), "solution": sol.tolist(), "n_clues": n_clues}) + "\n"
-                )
-                made += 1
-                n += 1
-    return n
-
-
-def load_eval_set(path: Path) -> list[dict]:
-    return [json.loads(line) for line in path.read_text().splitlines() if line]

@@ -1,20 +1,21 @@
-"""Greedy solve-rate eval on the fixed eval set.
+"""Greedy solve-rate eval on freshly generated eval-orbit puzzles.
 
-uv run scripts/eval.py --model tiny --training smoke --seed 0
+uv run scripts/eval.py --model tiny --training sft --seed 0 --puzzle-seed 0 --n 100
 """
 
 import argparse
 import json
-from pathlib import Path
 
 import numpy as np
 import torch
 
-from sudoku_diffusion.data import load_eval_set, solved
+from sudoku_diffusion.data import SPLIT_SEED, orbit_split, random_puzzle, solved
 from sudoku_diffusion.model import SudokuDenoiser, get_device
 from sudoku_diffusion.runs import load_checkpoint, run_dir
 from sudoku_diffusion.sampler import sample
 from sudoku_diffusion.variations import MODELS, TRAININGS
+
+CLUE_COUNTS = (0, 1, 2, 3, 4, 5, 6, 7, 8)
 
 
 def main() -> None:
@@ -22,6 +23,8 @@ def main() -> None:
     ap.add_argument("--model", required=True, choices=sorted(MODELS))
     ap.add_argument("--training", required=True, choices=sorted(TRAININGS))
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--puzzle-seed", type=int, default=0)
+    ap.add_argument("--n", type=int, default=100, help="puzzles per clue count")
     args = ap.parse_args()
     cfg = TRAININGS[args.training]
 
@@ -31,16 +34,24 @@ def main() -> None:
     print(f"loaded {meta['checkpoint']} checkpoint (step {meta.get('step')})")
     model.eval()
 
-    entries = load_eval_set(Path(__file__).resolve().parents[1] / "datasets" / "eval.jsonl")
-    puzzles = torch.tensor([e["puzzle"] for e in entries], dtype=torch.long, device=device)
-    boards, steps_used, _, _ = sample(
-        model, puzzles, cfg.max_sample_steps, cfg.commit_frac, commit_threshold=cfg.commit_threshold
-    )
+    rng = np.random.default_rng(args.puzzle_seed)
+    _, eval_sols = orbit_split(np.random.default_rng(SPLIT_SEED))
+    entries: list[tuple[int, np.ndarray]] = []
+    for n_clues in CLUE_COUNTS:
+        if n_clues == 0:
+            # greedy sampling is deterministic, one empty board is enough
+            entries.append((0, np.zeros(16, dtype=eval_sols.dtype)))
+            continue
+        for _ in range(args.n):
+            sol = eval_sols[rng.integers(len(eval_sols))]
+            entries.append((n_clues, random_puzzle(sol, n_clues, rng)))
+    puzzles = torch.tensor(np.stack([p for _, p in entries]), dtype=torch.long, device=device)
+    boards, steps_used, _, _ = sample(model, puzzles, cfg.max_sample_steps)
 
     by_clue: dict[int, list[tuple[bool, int]]] = {}
-    for e, b, s in zip(entries, boards.cpu().numpy(), steps_used.cpu().numpy()):
-        ok = solved(b, np.array(e["puzzle"]))
-        by_clue.setdefault(e["n_clues"], []).append((ok, int(s)))
+    for (n_clues, puz), b, s in zip(entries, boards.cpu().numpy(), steps_used.cpu().numpy()):
+        ok = solved(b, puz)
+        by_clue.setdefault(n_clues, []).append((ok, int(s)))
 
     total_ok, total = 0, 0
     print(f"{'clues':>5} | {'n':>4} | {'solve%':>6} | mean steps (solved)")
@@ -58,6 +69,7 @@ def main() -> None:
     with rec.open("a") as f:
         f.write(json.dumps({
             "type": "eval", "step": meta.get("step"), "checkpoint": meta["checkpoint"],
+            "puzzle_seed": args.puzzle_seed, "n_per_clue": args.n,
             "eval_solve_rate": round(total_ok / total, 4),
             "per_clue": {str(k): round(float(np.mean([ok for ok, _ in v])), 4) for k, v in by_clue.items()},
         }) + "\n")

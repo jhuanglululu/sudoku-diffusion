@@ -9,7 +9,7 @@ import argparse
 import numpy as np
 import torch
 
-from sudoku_diffusion.data import MASK, SPLIT_SEED, make_puzzle, orbit_split, solved
+from sudoku_diffusion.data import MASK, SPLIT_SEED, make_puzzle, orbit_split, random_puzzle, solved
 from sudoku_diffusion.model import SudokuDenoiser, get_device
 from sudoku_diffusion.runs import load_checkpoint
 from sudoku_diffusion.sampler import sample
@@ -52,10 +52,7 @@ def main() -> None:
         if args.clues < 4:
             # no unique puzzle exists below 4 clues; blank at random instead
             # (solved() verifies the board, so any valid completion counts)
-            sol = eval_sols[rng.integers(len(eval_sols))]
-            puzzle = np.zeros(16, dtype=sol.dtype)
-            keep = rng.choice(16, size=args.clues, replace=False)
-            puzzle[keep] = sol[keep]
+            puzzle = random_puzzle(eval_sols[rng.integers(len(eval_sols))], args.clues, rng)
         else:
             puzzle = None
             while puzzle is None:
@@ -67,8 +64,8 @@ def main() -> None:
     model.eval()
 
     boards, steps_used, _, trajs = sample(
-        model, torch.from_numpy(puzzle)[None].long().to(device), cfg.max_sample_steps, cfg.commit_frac,
-        track_trajectories=True, commit_threshold=cfg.commit_threshold,
+        model, torch.from_numpy(puzzle)[None].long().to(device), cfg.max_sample_steps,
+        track_trajectories=True,
     )
     traj = [t.cpu().numpy() for t in trajs[0]]
     print(f"puzzle ({args.clues} clues):")

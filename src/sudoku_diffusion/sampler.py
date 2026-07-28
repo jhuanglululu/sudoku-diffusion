@@ -3,12 +3,10 @@
 Each step, for every board:
 - filled non-clue cells may be *remasked*: greedy if argmax == MASK,
   stochastic with prob p(MASK);
-- masked cells get committed to a digit (argmax, or temperature-sampled from
-  the digit distribution), selected by one of two rules:
-  - top-k: the top `commit_frac` fraction of most-confident masked cells;
-  - confidence: every masked cell whose max digit probability reaches
-    `commit_threshold` (overrides top-k when set).
-  Either way at least one cell commits per step, so boards always progress.
+- masked cells choose among all 5 tokens (greedy argmax, or temperature-
+  sampled): a digit commits the cell, MASK means "not decided yet". The
+  model paces its own commits through the probability it leaves on MASK —
+  there is no external commit schedule.
 Clue cells are frozen. A board terminates when it is full and no cell was
 changed in a step (stable), or at max_steps. Remasking can therefore revise a
 board even after it is completely filled.
@@ -29,21 +27,15 @@ from .data import MASK
 @dataclass
 class Rollout:
     puzzle: torch.Tensor                 # (16,)
-    temperature: float = 1.0             # digit-sampling temperature used at rollout time
+    temperature: float = 1.0             # sampling temperature used at rollout time
     states: list[torch.Tensor] = field(default_factory=list)   # board before each step
-    remask_sites: list[torch.Tensor] = field(default_factory=list)  # bool (16,)
+    remask_sites: list[torch.Tensor] = field(default_factory=list)  # bool (16,) filled non-clue cells
     remask_taken: list[torch.Tensor] = field(default_factory=list)  # bool (16,)
-    commit_sites: list[torch.Tensor] = field(default_factory=list)  # bool (16,)
-    commit_tokens: list[torch.Tensor] = field(default_factory=list) # long (16,)
+    mask_sites: list[torch.Tensor] = field(default_factory=list)    # bool (16,) cells masked before the step
+    mask_tokens: list[torch.Tensor] = field(default_factory=list)   # long (16,) 5-way choice there; MASK = wait
     final_board: torch.Tensor | None = None
     steps_used: int = 0
     done: bool = False                   # stabilized (full and unchanged) within max_steps
-
-
-def _digit_probs(logits: torch.Tensor, temperature: float) -> torch.Tensor:
-    """Renormalized distribution over digits 1..4 (MASK excluded). (..., 4)"""
-    t = max(temperature, 1e-6)
-    return torch.softmax(logits[..., 1:] / t, dim=-1)
 
 
 @torch.no_grad()
@@ -51,18 +43,12 @@ def sample(
     model: torch.nn.Module,
     puzzles: torch.Tensor,
     max_steps: int,
-    commit_frac: float,
     temperature: float = 0.0,
     generator: torch.Generator | None = None,
     record: bool = False,
     track_trajectories: bool = False,
-    commit_threshold: float | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, list[Rollout], list[list[torch.Tensor]]]:
     """Run the sampler on a batch of puzzles (B, 16).
-
-    When commit_threshold is set, the confidence rule replaces top-k:
-    commit_frac is ignored and every masked cell at or above the threshold
-    commits (at least one per step regardless).
 
     Returns (final_boards, steps_used, rollouts, trajectories).
     `rollouts` is empty unless record=True; `trajectories` is empty unless
@@ -103,35 +89,22 @@ def sample(
             remask = filled & (logits.argmax(-1) == MASK)
         boards[remask] = MASK
 
-        # --- commit most-confident masked cells (from pre-remask mask set)
+        # --- masked cells (from the pre-remask mask set): 5-way choice,
+        # a digit commits the cell, MASK waits
         masked = (prev == MASK) & active[:, None]
-        dprobs = _digit_probs(logits, temperature if stochastic else 1.0)
-        conf = dprobs.max(-1).values.masked_fill(~masked, -1.0)
-        # per-board k committed cells, 0 if nothing masked; the k best-ranked by
-        # confidence commit. Non-masked cells sit at conf -1.0 < any probability,
-        # so ranks < n_masked are all masked cells.
-        # top-k rule: k = max(1, ceil(commit_frac * n_masked)), in float64 so the
-        # ceil matches math.ceil at boundary values.
-        # confidence rule: k = cells at/above commit_threshold, at least 1.
-        n_masked = masked.sum(-1)
-        if commit_threshold is None:
-            k = (n_masked.double() * commit_frac).ceil().long().clamp(min=1)
-        else:
-            k = (conf >= commit_threshold).sum(-1).clamp(min=1)
-        k = torch.where(n_masked > 0, k, torch.zeros_like(k))
-        ranks = conf.argsort(-1, descending=True).argsort(-1)
-        commit = ranks < k[:, None]
-        chosen_tok = torch.zeros_like(boards)
         if stochastic:
-            flat = dprobs[commit]
-            tok = torch.multinomial(flat, 1, generator=generator).squeeze(-1) + 1
+            tprobs = torch.softmax(logits / max(temperature, 1e-6), dim=-1)
+            tok = torch.multinomial(
+                tprobs.reshape(-1, tprobs.shape[-1]), 1, generator=generator
+            ).reshape(B, -1)
         else:
-            tok = dprobs[commit].argmax(-1) + 1
-        chosen_tok[commit] = tok
+            tok = logits.argmax(-1)
+        chosen_tok = torch.where(masked, tok, torch.zeros_like(boards))
+        commit = masked & (chosen_tok != MASK)
         boards[commit] = chosen_tok[commit]
 
         if record:
-            rec.append((active.clone(), prev, filled, remask, commit, chosen_tok))
+            rec.append((active.clone(), prev, filled, remask, masked, chosen_tok))
 
         # --- termination: full and unchanged
         stable = ((boards != MASK).all(-1)) & (boards == prev).all(-1) & active
@@ -146,14 +119,14 @@ def sample(
         act = torch.stack([a for a, *_ in rec]).cpu().tolist() if rec else []
         for b in range(B):
             r = rollouts[b]
-            for t, (_, prev, filled, remask, commit, chosen_tok) in enumerate(rec):
+            for t, (_, prev, filled, remask, masked, chosen_tok) in enumerate(rec):
                 if not act[t][b]:
                     break  # once inactive, a board never records again
                 r.states.append(prev[b])
                 r.remask_sites.append(filled[b])
                 r.remask_taken.append(remask[b])
-                r.commit_sites.append(commit[b])
-                r.commit_tokens.append(chosen_tok[b])
+                r.mask_sites.append(masked[b])
+                r.mask_tokens.append(chosen_tok[b])
     for b in range(B):
         rollouts[b].final_board = boards[b].clone()
         rollouts[b].steps_used = int(steps_used[b])
@@ -168,21 +141,21 @@ def action_logprob(model: torch.nn.Module, rollouts: list[Rollout]) -> torch.Ten
     Fully batched: all recorded steps of all rollouts go through one forward
     and a handful of tensor ops, so the autograd graph stays small."""
     device = next(model.parameters()).device
-    states, sites, taken, csites, ctoks, owner, temps = [], [], [], [], [], [], []
+    states, sites, taken, msites, mtoks, owner, temps = [], [], [], [], [], [], []
     for i, r in enumerate(rollouts):
         states += r.states
         sites += r.remask_sites
         taken += r.remask_taken
-        csites += r.commit_sites
-        ctoks += r.commit_tokens
+        msites += r.mask_sites
+        mtoks += r.mask_tokens
         owner += [i] * len(r.states)
         temps += [max(r.temperature, 1e-6)] * len(r.states)
     if not states:
         return torch.zeros(len(rollouts), device=device)
     sites_t = torch.stack(sites).to(device)
     taken_t = torch.stack(taken).to(device)
-    commit = torch.stack(csites).to(device)                       # (N, 16) bool
-    tokens = torch.stack(ctoks).to(device)                        # (N, 16) long
+    msites_t = torch.stack(msites).to(device)                     # (N, 16) bool
+    mtoks_t = torch.stack(mtoks).to(device)                       # (N, 16) long
     temp = torch.tensor(temps, device=device)[:, None, None]      # (N, 1, 1)
 
     logits = model(torch.stack(states).to(device))                # (N, 16, 5)
@@ -192,10 +165,10 @@ def action_logprob(model: torch.nn.Module, rollouts: list[Rollout]) -> torch.Ten
     keep = sites_t & ~taken_t
     per_state = (logp[..., MASK] * taken_t).sum(-1)
     per_state = per_state + (torch.log1p(-p_mask.clamp(max=1 - 1e-6)) * keep).sum(-1)
-    # committed digits: renormalized over digits, at the rollout's temperature
-    dlp = torch.log_softmax(logits[..., 1:] / temp, dim=-1)       # (N, 16, 4)
-    digit_lp = dlp.gather(-1, (tokens - 1).clamp(min=0)[..., None]).squeeze(-1)
-    per_state = per_state + (digit_lp * commit).sum(-1)
+    # masked cells: 5-way choice (MASK = wait) at the rollout's temperature
+    tlp = torch.log_softmax(logits / temp, dim=-1)                # (N, 16, 5)
+    tok_lp = tlp.gather(-1, mtoks_t[..., None]).squeeze(-1)
+    per_state = per_state + (tok_lp * msites_t).sum(-1)
 
     owner_t = torch.tensor(owner, device=device)
     return torch.zeros(len(rollouts), device=device).index_add(0, owner_t, per_state)

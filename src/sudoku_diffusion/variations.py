@@ -27,10 +27,6 @@ class BaseTrainingConfig(BaseModel):
     val_every: int = 50
     # sampler (used by eval/demo for both kinds)
     max_sample_steps: int = 12
-    commit_frac: float = 0.35
-    # when set, confidence-rule committing replaces top-k (commit_frac ignored):
-    # every masked cell whose max digit probability reaches it commits
-    commit_threshold: float | None = None
 
 
 class SFTConfig(BaseTrainingConfig):
@@ -70,13 +66,8 @@ TRAININGS: dict[str, TrainingConfig] = {
         name="grpo-smoke", steps=10, lr=1e-5, warmup_steps=0,
         init_from_training="smoke", group_size=4, puzzles_per_batch=4, log_every=1, val_every=5,
     ),
-    "grpo-topk": GRPOConfig(
-        name="grpo-topk", steps=500, lr=2e-5, warmup_steps=10,
+    "grpo": GRPOConfig(
+        name="grpo", steps=500, lr=2e-5, warmup_steps=10,
         init_from_training="sft", group_size=8, puzzles_per_batch=32, log_every=5, val_every=25,
-    ),
-    "grpo-confidence": GRPOConfig(
-        name="grpo-confidence", steps=500, lr=2e-5, warmup_steps=10,
-        init_from_training="sft", group_size=8, puzzles_per_batch=32, log_every=5, val_every=25,
-        commit_threshold=0.9,
     ),
 }
