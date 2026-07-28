@@ -50,7 +50,7 @@ class GRPOConfig(BaseTrainingConfig):
     # rollout temperature anneals linearly to this by the last step, so late
     # training samples near-greedy trajectories (stuck states included) while
     # keeping logprobs well-defined; must stay > 0
-    temperature_final: float = 1.0
+    temperature_final: float = 0.3
     clip_eps: float = 0.2
     solved_bonus: float = 1.0
     efficiency_alpha: float = 0.5
