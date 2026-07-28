@@ -58,7 +58,7 @@ class GRPOConfig(BaseTrainingConfig):
     # fine since the reward verifies the board instead of matching one target.
     # 7-8 clues are deliberately held out of training: eval on them measures
     # generalization to unseen clue counts
-    clue_counts: tuple[int, ...] = (0, 4, 5, 6)
+    clue_counts: tuple[int, ...] = (1, 2, 3, 4, 5, 6, 7, 8)
 
 
 TrainingConfig = SFTConfig | GRPOConfig
