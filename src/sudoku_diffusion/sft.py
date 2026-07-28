@@ -6,7 +6,7 @@ Corruption of a solution grid, per example:
 - of the remaining cells, a random fraction (wrong_frac_range) is replaced by
   a *wrong* digit.
 Targets: masked cell -> correct digit; wrong cell -> MASK (teaches remasking);
-untouched cell -> ignored (-100).
+untouched cell -> its own value (teaches keeping correct cells filled).
 
 Consistency: a random geometric symmetry g per batch; loss includes symmetric
 KL between logits(x) and g^-1(logits(g(x))).
@@ -48,6 +48,9 @@ def corrupt_batch(
     offs = torch.from_numpy(rng.integers(1, 4, size=(B, 16)))
     wrong_vals = ((inputs - 1 + offs) % 4) + 1
 
+    # untouched correct cells: target = keep their own value — without this the
+    # model has no signal against remasking correct cells and oscillates forever
+    targets = inputs.clone()
     targets[masked] = inputs[masked]
     inputs[masked] = MASK
     targets[wrong] = MASK

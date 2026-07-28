@@ -21,8 +21,8 @@ def test_corrupt_batch_targets_exact():
     # wrong cells: input is a digit != solution, target is MASK
     assert torch.all(targets[wrong] == MASK)
     assert torch.all((inputs[wrong] >= 1) & (inputs[wrong] <= 4))
-    # untouched cells ignored by the loss
-    assert torch.all(targets[untouched] == IGNORE)
+    # untouched cells: target = keep own value (anti-oscillation signal)
+    assert torch.all(targets[untouched] == sol[untouched])
 
 
 def test_corrupt_batch_can_produce_empty_board():
