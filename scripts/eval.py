@@ -27,7 +27,8 @@ def main() -> None:
 
     device = get_device()
     model = SudokuDenoiser(MODELS[args.model]).to(device)
-    load_checkpoint(model, args.model, args.training, args.seed)
+    meta = load_checkpoint(model, args.model, args.training, args.seed)
+    print(f"loaded {meta['checkpoint']} checkpoint (step {meta.get('step')})")
     model.eval()
 
     entries = load_eval_set(Path(__file__).resolve().parents[1] / "datasets" / "eval.jsonl")
@@ -54,7 +55,8 @@ def main() -> None:
     rec = run_dir("records", args.model, args.training, args.seed) / "record.jsonl"
     with rec.open("a") as f:
         f.write(json.dumps({
-            "type": "eval", "step": -1, "eval_solve_rate": round(total_ok / total, 4),
+            "type": "eval", "step": meta.get("step"), "checkpoint": meta["checkpoint"],
+            "eval_solve_rate": round(total_ok / total, 4),
             "per_clue": {str(k): round(float(np.mean([ok for ok, _ in v])), 4) for k, v in by_clue.items()},
         }) + "\n")
 

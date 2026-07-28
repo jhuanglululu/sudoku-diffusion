@@ -15,6 +15,7 @@ recompute the trajectory log-probability under the current policy with grad.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 import torch
@@ -25,6 +26,7 @@ from .data import MASK
 @dataclass
 class Rollout:
     puzzle: torch.Tensor                 # (16,)
+    temperature: float = 1.0             # digit-sampling temperature used at rollout time
     states: list[torch.Tensor] = field(default_factory=list)   # board before each step
     remask_sites: list[torch.Tensor] = field(default_factory=list)  # bool (16,)
     remask_taken: list[torch.Tensor] = field(default_factory=list)  # bool (16,)
@@ -32,7 +34,7 @@ class Rollout:
     commit_tokens: list[torch.Tensor] = field(default_factory=list) # long (16,)
     final_board: torch.Tensor | None = None
     steps_used: int = 0
-    done: bool = False
+    done: bool = False                   # stabilized (full and unchanged) within max_steps
 
 
 def _digit_probs(logits: torch.Tensor, temperature: float) -> torch.Tensor:
@@ -62,7 +64,10 @@ def sample(
     clue = puzzles != MASK
     B = boards.shape[0]
     stochastic = temperature > 0
-    rollouts = [Rollout(puzzle=puzzles[b].clone()) for b in range(B)]
+    rollouts = [
+        Rollout(puzzle=puzzles[b].clone(), temperature=temperature if stochastic else 1.0)
+        for b in range(B)
+    ]
     steps_used = torch.full((B,), max_steps, dtype=torch.long, device=device)
     active = torch.ones(B, dtype=torch.bool, device=device)
     trajectories: list[list[torch.Tensor]] = [[boards[b].clone()] for b in range(B)]
@@ -94,7 +99,7 @@ def sample(
             n_masked = int(masked[b].sum())
             if n_masked == 0:
                 continue
-            k = max(1, int(torch.ceil(torch.tensor(commit_frac * n_masked)).item()))
+            k = max(1, math.ceil(commit_frac * n_masked))
             idx = conf[b].topk(k).indices
             commit[b, idx] = True
         if stochastic:
@@ -125,7 +130,7 @@ def sample(
     for b in range(B):
         rollouts[b].final_board = boards[b].clone()
         rollouts[b].steps_used = int(steps_used[b])
-        rollouts[b].done = bool(steps_used[b] < max_steps)
+        rollouts[b].done = bool(~active[b])  # stabilized, even if on the last step
     return boards, steps_used, (rollouts if record else []), trajectories
 
 
@@ -152,10 +157,11 @@ def action_logprob(model: torch.nn.Module, rollouts: list[Rollout]) -> torch.Ten
             keep = sites & ~taken
             total[i] = total[i] + lp[taken, MASK].sum()
             total[i] = total[i] + torch.log1p(-pr[keep, MASK].clamp(max=1 - 1e-6)).sum()
-            # committed digits: renormalized over digits
+            # committed digits: renormalized over digits, at the rollout's temperature
             c = r.commit_sites[t]
             if c.any():
-                dlp = torch.log_softmax(logits[row][c][:, 1:], dim=-1)
+                t_ = max(r.temperature, 1e-6)
+                dlp = torch.log_softmax(logits[row][c][:, 1:] / t_, dim=-1)
                 total[i] = total[i] + dlp.gather(1, (r.commit_tokens[t][c] - 1)[:, None]).sum()
             row += 1
     return total

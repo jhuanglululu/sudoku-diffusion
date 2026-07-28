@@ -9,7 +9,7 @@ import argparse
 import numpy as np
 import torch
 
-from sudoku_diffusion.data import MASK, make_puzzle, orbit_split, solved
+from sudoku_diffusion.data import MASK, SPLIT_SEED, make_puzzle, orbit_split, solved
 from sudoku_diffusion.model import SudokuDenoiser, get_device
 from sudoku_diffusion.runs import load_checkpoint
 from sudoku_diffusion.sampler import sample
@@ -48,7 +48,7 @@ def main() -> None:
     if args.clues == 0:
         puzzle = np.zeros(16, dtype=np.int64)
     else:
-        _, eval_sols = orbit_split(np.random.default_rng(12345))
+        _, eval_sols = orbit_split(np.random.default_rng(SPLIT_SEED))
         puzzle = None
         while puzzle is None:
             puzzle = make_puzzle(eval_sols[rng.integers(len(eval_sols))], args.clues, rng)

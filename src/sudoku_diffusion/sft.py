@@ -21,22 +21,24 @@ import torch
 import torch.nn.functional as F
 from tqdm import tqdm
 
-from .data import MASK, orbit_split, symmetry_group
+from .data import MASK, SPLIT_SEED, orbit_split, symmetry_group
 from .model import SudokuDenoiser, get_device
 from .runs import Record, save_checkpoint, seed_all
-from .variations import MODELS, TRAININGS
+from .variations import MODELS, TRAININGS, SFTConfig
 
 IGNORE = -100
 
 
 def corrupt_batch(
-    solutions: np.ndarray, cfg, rng: np.random.Generator
+    solutions: np.ndarray, cfg: SFTConfig, rng: np.random.Generator
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Sample a corrupted batch. Returns (inputs, targets), both (B, 16)."""
+    """Sample a corrupted batch. Returns (inputs, targets), both (B, 16).
+    Every cell gets a target: masked -> correct digit, wrong -> MASK,
+    untouched -> its own value (without the last, the model has no signal
+    against remasking correct cells and oscillates forever)."""
     B = cfg.batch_size
     sols = solutions[rng.integers(len(solutions), size=B)]
     inputs = torch.from_numpy(sols).long()
-    targets = torch.full_like(inputs, IGNORE)
 
     mask_frac = rng.uniform(*cfg.mask_frac_range, size=B)
     wrong_frac = rng.uniform(*cfg.wrong_frac_range, size=B)
@@ -48,19 +50,16 @@ def corrupt_batch(
     offs = torch.from_numpy(rng.integers(1, 4, size=(B, 16)))
     wrong_vals = ((inputs - 1 + offs) % 4) + 1
 
-    # untouched correct cells: target = keep their own value — without this the
-    # model has no signal against remasking correct cells and oscillates forever
     targets = inputs.clone()
-    targets[masked] = inputs[masked]
-    inputs[masked] = MASK
     targets[wrong] = MASK
+    inputs[masked] = MASK
     inputs[wrong] = wrong_vals[wrong]
     return inputs, targets
 
 
-def sft_losses(model, inputs, targets, group: torch.Tensor, cfg, gen: torch.Generator):
+def sft_losses(model, inputs, targets, group: torch.Tensor, gen: torch.Generator):
     logits = model(inputs)
-    ce = F.cross_entropy(logits.reshape(-1, 5), targets.reshape(-1), ignore_index=IGNORE)
+    ce = F.cross_entropy(logits.reshape(-1, logits.shape[-1]), targets.reshape(-1), ignore_index=IGNORE)
 
     g = group[torch.randint(len(group), (1,), generator=gen).item()]
     inv = torch.empty_like(g)
@@ -76,14 +75,15 @@ def sft_losses(model, inputs, targets, group: torch.Tensor, cfg, gen: torch.Gene
 
 def train_sft(model_name: str, training_name: str, seed: int) -> None:
     mcfg, cfg = MODELS[model_name], TRAININGS[training_name]
-    assert cfg.kind == "sft"
+    if not isinstance(cfg, SFTConfig):
+        raise ValueError(f"training '{training_name}' is kind={cfg.kind!r}, expected sft")
     seed_all(seed)
     device = get_device()
     rng = np.random.default_rng(seed)
     gen = torch.Generator().manual_seed(seed)
 
-    train_sols, eval_sols = orbit_split(np.random.default_rng(12345))
-    group = torch.from_numpy(symmetry_group()).long()
+    train_sols, eval_sols = orbit_split(np.random.default_rng(SPLIT_SEED))
+    group = torch.from_numpy(symmetry_group()).long().to(device)
     model = SudokuDenoiser(mcfg).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=cfg.lr)
     sched = torch.optim.lr_scheduler.LambdaLR(
@@ -93,11 +93,12 @@ def train_sft(model_name: str, training_name: str, seed: int) -> None:
     val_inputs, val_targets = corrupt_batch(eval_sols, cfg, np.random.default_rng(999))
     val_inputs, val_targets = val_inputs.to(device), val_targets.to(device)
 
+    best_val = float("inf")
     bar = tqdm(range(cfg.steps), desc=f"{model_name}/{training_name} e0")
     t0 = time.time()
     for step in bar:
         inputs, targets = corrupt_batch(train_sols, cfg, rng)
-        ce, cons = sft_losses(model, inputs.to(device), targets.to(device), group.to(device), cfg, gen)
+        ce, cons = sft_losses(model, inputs.to(device), targets.to(device), group, gen)
         loss = ce + cfg.consistency_weight * cons
         opt.zero_grad()
         loss.backward()
@@ -115,7 +116,7 @@ def train_sft(model_name: str, training_name: str, seed: int) -> None:
         if (step + 1) % cfg.val_every == 0 or step + 1 == cfg.steps:
             model.eval()
             with torch.no_grad():
-                vce, vcons = sft_losses(model, val_inputs, val_targets, group.to(device), cfg, gen)
+                vce, vcons = sft_losses(model, val_inputs, val_targets, group, gen)
                 val = (vce + cfg.consistency_weight * vcons).item()
             model.train()
             rec.write(type="eval", step=step + 1, val_loss=round(val, 4))
@@ -126,4 +127,6 @@ def train_sft(model_name: str, training_name: str, seed: int) -> None:
                 f"loss {loss.item():6.3f} | val {val:6.3f} | diff {diff:+6.3f}"
             )
             bar.set_postfix(loss=f"{loss.item():.3f}", val=f"{val:.3f}")
-            save_checkpoint(model, model_name, training_name, seed, step + 1, {"val_loss": val})
+            is_best = val < best_val
+            best_val = min(best_val, val)
+            save_checkpoint(model, model_name, training_name, seed, step + 1, {"val_loss": val}, best=is_best)

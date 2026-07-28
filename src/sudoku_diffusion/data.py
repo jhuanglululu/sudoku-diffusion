@@ -16,6 +16,9 @@ import numpy as np
 MASK = 0
 N = 4
 CELLS = 16
+# The one seed that defines the train/eval orbit split. Training, eval-set
+# generation, and the demo must all use it, or eval orbits leak into training.
+SPLIT_SEED = 12345
 
 # unit index sets: 4 rows, 4 cols, 4 boxes
 ROWS = [tuple(range(r * 4, r * 4 + 4)) for r in range(4)]
@@ -170,11 +173,14 @@ def validity_score(board: np.ndarray) -> float:
 def generate_eval_set(
     path: Path, seed: int = 12345, per_clue: int = 100, clue_counts: tuple[int, ...] = (0, 4, 5, 6, 7, 8)
 ) -> int:
-    """Write a fixed eval set of unique puzzles from eval-orbit solutions.
-    n_clues=0 emits a single empty board (greedy eval is deterministic)."""
+    """Write a fixed eval set of distinct unique-solution puzzles from
+    eval-orbit solutions (the orbit split always uses SPLIT_SEED; `seed` only
+    drives puzzle generation). n_clues=0 emits a single empty board (greedy
+    eval is deterministic)."""
     rng = np.random.default_rng(seed)
-    _, eval_sols = orbit_split(np.random.default_rng(seed))
+    _, eval_sols = orbit_split(np.random.default_rng(SPLIT_SEED))
     path.parent.mkdir(parents=True, exist_ok=True)
+    seen: set[bytes] = set()
     n = 0
     with path.open("w") as f:
         for n_clues in clue_counts:
@@ -188,8 +194,9 @@ def generate_eval_set(
                 attempts += 1
                 sol = eval_sols[rng.integers(len(eval_sols))]
                 puz = make_puzzle(sol, n_clues, rng)
-                if puz is None:
+                if puz is None or puz.tobytes() in seen:
                     continue
+                seen.add(puz.tobytes())
                 f.write(
                     json.dumps({"puzzle": puz.tolist(), "solution": sol.tolist(), "n_clues": n_clues}) + "\n"
                 )

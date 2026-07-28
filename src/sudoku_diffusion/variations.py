@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel
 
 
@@ -16,32 +18,40 @@ class ModelConfig(BaseModel):
     dropout: float = 0.0
 
 
-class TrainingConfig(BaseModel):
+class BaseTrainingConfig(BaseModel):
     name: str
-    kind: str  # "sft" or "grpo"
     steps: int
-    batch_size: int
     lr: float
     warmup_steps: int = 50
     log_every: int = 10
     val_every: int = 50
-    # SFT corruption
+    # sampler (used by eval/demo for both kinds)
+    max_sample_steps: int = 12
+    commit_frac: float = 0.35
+
+
+class SFTConfig(BaseTrainingConfig):
+    kind: Literal["sft"] = "sft"
+    batch_size: int
+    # corruption
     mask_frac_range: tuple[float, float] = (0.0, 1.0)  # 1.0 => fully empty boards seen in SFT
     wrong_frac_range: tuple[float, float] = (0.0, 0.3)
     consistency_weight: float = 1.0
-    # sampler
-    max_sample_steps: int = 12
-    commit_frac: float = 0.35
-    # GRPO
-    init_from_training: str | None = None  # sft checkpoint to start from
+
+
+class GRPOConfig(BaseTrainingConfig):
+    kind: Literal["grpo"] = "grpo"
+    init_from_training: str  # sft checkpoint to start from
     group_size: int = 8
     puzzles_per_batch: int = 16
     temperature: float = 1.0
     clip_eps: float = 0.2
     solved_bonus: float = 1.0
     efficiency_alpha: float = 0.5
-    grpo_clue_counts: tuple[int, ...] = (0, 4, 5, 6)  # 0 = start from an empty board
+    clue_counts: tuple[int, ...] = (0, 4, 5, 6)  # 0 = start from an empty board
 
+
+TrainingConfig = SFTConfig | GRPOConfig
 
 MODELS: dict[str, ModelConfig] = {
     "tiny": ModelConfig(name="tiny", d_model=32, n_layers=2, n_heads=2, d_ff=64),
@@ -49,14 +59,14 @@ MODELS: dict[str, ModelConfig] = {
 }
 
 TRAININGS: dict[str, TrainingConfig] = {
-    "smoke": TrainingConfig(name="smoke", kind="sft", steps=50, batch_size=32, lr=3e-4, warmup_steps=5, val_every=25),
-    "sft": TrainingConfig(name="sft", kind="sft", steps=4000, batch_size=256, lr=1e-3, warmup_steps=100, val_every=200),
-    "grpo-smoke": TrainingConfig(
-        name="grpo-smoke", kind="grpo", steps=10, batch_size=0, lr=1e-5, warmup_steps=0,
+    "smoke": SFTConfig(name="smoke", steps=50, batch_size=32, lr=3e-4, warmup_steps=5, val_every=25),
+    "sft": SFTConfig(name="sft", steps=4000, batch_size=256, lr=1e-3, warmup_steps=100, val_every=200),
+    "grpo-smoke": GRPOConfig(
+        name="grpo-smoke", steps=10, lr=1e-5, warmup_steps=0,
         init_from_training="smoke", group_size=4, puzzles_per_batch=4, log_every=1, val_every=5,
     ),
-    "grpo": TrainingConfig(
-        name="grpo", kind="grpo", steps=500, batch_size=0, lr=2e-5, warmup_steps=10,
+    "grpo": GRPOConfig(
+        name="grpo", steps=500, lr=2e-5, warmup_steps=10,
         init_from_training="sft", group_size=8, puzzles_per_batch=32, log_every=5, val_every=25,
     ),
 }

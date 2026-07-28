@@ -43,14 +43,24 @@ class Record:
             f.write(json.dumps(fields) + "\n")
 
 
-def save_checkpoint(model_nn: torch.nn.Module, model: str, training: str, seed: int, step: int, extra: dict) -> None:
+def save_checkpoint(
+    model_nn: torch.nn.Module, model: str, training: str, seed: int, step: int, extra: dict, best: bool = False
+) -> None:
+    """Write current.safetensors (latest); with best=True also best.safetensors."""
     d = run_dir("checkpoints", model, training, seed)
     state = {k: v.contiguous().cpu() for k, v in model_nn.state_dict().items()}
+    meta = json.dumps({"step": step, **extra})
     save_file(state, str(d / "current.safetensors"))
-    (d / "current.json").write_text(json.dumps({"step": step, **extra}))
+    (d / "current.json").write_text(meta)
+    if best:
+        save_file(state, str(d / "best.safetensors"))
+        (d / "best.json").write_text(meta)
 
 
-def load_checkpoint(model_nn: torch.nn.Module, model: str, training: str, seed: int) -> dict:
+def load_checkpoint(model_nn: torch.nn.Module, model: str, training: str, seed: int, which: str = "best") -> dict:
+    """Load `best` (falling back to `current` if no best exists) or `current`."""
     d = run_dir("checkpoints", model, training, seed)
-    model_nn.load_state_dict(load_file(str(d / "current.safetensors")))
-    return json.loads((d / "current.json").read_text())
+    if which == "best" and not (d / "best.safetensors").exists():
+        which = "current"
+    model_nn.load_state_dict(load_file(str(d / f"{which}.safetensors")))
+    return {"checkpoint": which, **json.loads((d / f"{which}.json").read_text())}

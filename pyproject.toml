@@ -1,7 +1,7 @@
 [project]
 name = "sudoku-diffusion"
 version = "0.1.0"
-description = "Add your description here"
+description = "Masked discrete diffusion transformer that solves 4x4 sudoku; SFT with remasking plus GRPO"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [

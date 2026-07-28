@@ -37,23 +37,21 @@ def test_consistency_loss_zero_for_equivariant_model():
         def forward(self, tokens):
             return torch.zeros(tokens.shape[0], 16, 5)
 
-    cfg = TRAININGS["smoke"]
     group = torch.from_numpy(symmetry_group()).long()
     inputs = torch.zeros(4, 16, dtype=torch.long)
     targets = torch.full((4, 16), IGNORE)
     targets[:, 0] = 1
     gen = torch.Generator().manual_seed(0)
-    _, cons = sft_losses(Uniform(), inputs, targets, group, cfg, gen)
+    _, cons = sft_losses(Uniform(), inputs, targets, group, gen)
     assert abs(cons.item()) < 1e-6
 
 
 def test_consistency_nonzero_for_real_model():
-    cfg = TRAININGS["smoke"]
     group = torch.from_numpy(symmetry_group()).long()
     model = SudokuDenoiser(MODELS["tiny"])
     inputs = torch.randint(0, 5, (4, 16))
     targets = torch.full((4, 16), IGNORE)
     targets[:, 0] = 1
     gen = torch.Generator().manual_seed(3)  # avoid identity perm draw
-    ce, cons = sft_losses(model, inputs, targets, group, cfg, gen)
+    ce, cons = sft_losses(model, inputs, targets, group, gen)
     assert torch.isfinite(ce) and torch.isfinite(cons)
