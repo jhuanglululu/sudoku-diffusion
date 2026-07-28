@@ -2,7 +2,7 @@ import numpy as np
 import torch
 
 from sudoku_diffusion.data import all_solutions
-from sudoku_diffusion.grpo import group_advantages, reward, sample_puzzles
+from sudoku_diffusion.grpo import group_advantages, reward, rollout_temperature, sample_puzzles
 from sudoku_diffusion.variations import TRAININGS
 
 
@@ -24,6 +24,15 @@ def test_reward_prefers_fewer_steps():
     assert fast > slow
     unsolved, ok3 = reward(np.ones(16, dtype=sol.dtype), empty, steps_used=3, cfg=cfg)
     assert not ok3 and unsolved < slow
+
+
+def test_rollout_temperature_anneals_linearly():
+    cfg = TRAININGS["grpo"].model_copy(update={"steps": 101, "temperature": 1.0, "temperature_final": 0.3})
+    assert rollout_temperature(cfg, 0) == 1.0
+    assert abs(rollout_temperature(cfg, 50) - 0.65) < 1e-9
+    assert abs(rollout_temperature(cfg, 100) - 0.3) < 1e-9
+    one = TRAININGS["grpo"].model_copy(update={"steps": 1})
+    assert rollout_temperature(one, 0) == 1.0  # no divide-by-zero on 1-step runs
 
 
 def test_sample_puzzles_includes_empty():

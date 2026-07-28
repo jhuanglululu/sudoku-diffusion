@@ -2,7 +2,10 @@
 
 Per step: sample `puzzles_per_batch` puzzles from train-orbit solutions
 (clue counts from clue_counts; 0 = empty board), roll out `group_size`
-stochastic trajectories per puzzle, reward each final board:
+stochastic trajectories per puzzle at a temperature annealed linearly from
+`temperature` to `temperature_final` over the run (late training samples
+near-greedy trajectories, closing the train/eval gap), reward each final
+board:
 
     reward = validity_score + (solved ? solved_bonus * (1 + alpha * (1 - steps_used/max_steps)) : 0)
 
@@ -32,6 +35,12 @@ def reward(final_board: np.ndarray, puzzle: np.ndarray, steps_used: int, cfg: GR
     if ok:
         r += cfg.solved_bonus * (1 + cfg.efficiency_alpha * (1 - steps_used / cfg.max_sample_steps))
     return r, ok
+
+
+def rollout_temperature(cfg: GRPOConfig, step: int) -> float:
+    """Linear anneal from cfg.temperature to cfg.temperature_final over the run."""
+    frac = step / max(cfg.steps - 1, 1)
+    return cfg.temperature + (cfg.temperature_final - cfg.temperature) * frac
 
 
 def group_advantages(rewards: torch.Tensor) -> torch.Tensor:
@@ -82,9 +91,10 @@ def train_grpo(model_name: str, training_name: str, seed: int) -> None:
     for step in bar:
         puzzles = sample_puzzles(train_sols, cfg, rng)
         batch = torch.from_numpy(np.repeat(puzzles, G, axis=0)).long().to(device)  # (P*G, 16)
+        temp = rollout_temperature(cfg, step)
         _, steps_used, rollouts, _ = sample(
             model, batch, cfg.max_sample_steps,
-            temperature=cfg.temperature, generator=gen, record=True,
+            temperature=temp, generator=gen, record=True,
         )
         rewards = torch.zeros(P * G)
         solves = 0
@@ -113,7 +123,8 @@ def train_grpo(model_name: str, training_name: str, seed: int) -> None:
             rec.write(
                 type="step", step=step + 1, loss=round(loss.item(), 4),
                 reward=round(rewards.mean().item(), 4), solve_rate=round(solve_rate, 4),
-                mean_steps=round(mean_steps, 2), grad_norm=round(grad_norm, 4),
+                mean_steps=round(mean_steps, 2), temperature=round(temp, 4),
+                grad_norm=round(grad_norm, 4),
                 lr=sched.get_last_lr()[0], sec_per_step=round((time.time() - t0) / (step + 1), 3),
             )
             bar.set_postfix(reward=f"{rewards.mean():.3f}", solve=f"{solve_rate:.2f}", steps=f"{mean_steps:.1f}")

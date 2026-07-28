@@ -44,11 +44,17 @@ class GRPOConfig(BaseTrainingConfig):
     group_size: int = 8
     puzzles_per_batch: int = 16
     temperature: float = 1.0
+    # rollout temperature anneals linearly to this by the last step, so late
+    # training samples near-greedy trajectories (stuck states included) while
+    # keeping logprobs well-defined; must stay > 0
+    temperature_final: float = 0.3
     clip_eps: float = 0.2
     solved_bonus: float = 1.0
     efficiency_alpha: float = 0.5
     # 0 = start from an empty board; 1..3 have multiple solutions on 4x4,
-    # fine since the reward verifies the board instead of matching one target
+    # fine since the reward verifies the board instead of matching one target.
+    # 7-8 clues are deliberately held out of training: eval on them measures
+    # generalization to unseen clue counts
     clue_counts: tuple[int, ...] = (0, 1, 2, 3, 4, 5, 6)
 
 
