@@ -30,7 +30,7 @@ def main() -> None:
 
     device = get_device()
     model = SudokuDenoiser(MODELS[args.model]).to(device)
-    meta = load_checkpoint(model, args.model, args.training, args.seed)
+    meta = load_checkpoint(model, args.model, args.training, args.seed, which="current")
     print(f"loaded {meta['checkpoint']} checkpoint (step {meta.get('step')})")
     model.eval()
 

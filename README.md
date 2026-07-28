@@ -58,8 +58,8 @@ uv run pytest
 
 - `records/<model>/<training>/<seed>/record.jsonl` — per-run metrics (meta line, then step/eval lines)
 - `checkpoints/<model>/<training>/<seed>/current.safetensors` (+ `.json` sidecar) — latest weights;
-  `best.safetensors` — best weights by val loss (SFT) / solve rate (GRPO). eval, demo, and
-  GRPO init load `best`, falling back to `current`
+  `best.safetensors` — best weights by val loss (SFT) / solve rate (GRPO). eval and demo
+  load `current` (latest); GRPO init loads `best`, falling back to `current`
 
 Eval puzzles are generated on the fly (`--puzzle-seed`, `--n` per clue count) from
 solution grids whose whole symmetry orbits are held out of training.

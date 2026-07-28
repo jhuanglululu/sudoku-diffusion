@@ -60,7 +60,7 @@ def main() -> None:
 
     device = get_device()
     model = SudokuDenoiser(MODELS[args.model]).to(device)
-    load_checkpoint(model, args.model, args.training, args.seed)
+    load_checkpoint(model, args.model, args.training, args.seed, which="current")
     model.eval()
 
     boards, steps_used, _, trajs = sample(
