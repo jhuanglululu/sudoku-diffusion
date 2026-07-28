@@ -19,7 +19,7 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-from .data import SPLIT_SEED, make_puzzle, orbit_split, solved, validity_score
+from .data import CELLS, SPLIT_SEED, orbit_split, solved, validity_score
 from .model import SudokuDenoiser, get_device
 from .runs import Record, load_checkpoint, save_checkpoint, seed_all
 from .sampler import action_logprob, sample
@@ -42,23 +42,19 @@ def group_advantages(rewards: torch.Tensor) -> torch.Tensor:
 
 
 def sample_puzzles(train_sols: np.ndarray, cfg: GRPOConfig, rng: np.random.Generator) -> np.ndarray:
+    """Blank random cells of a train solution down to n_clues. No uniqueness
+    requirement — the reward verifies the final board (valid + consistent with
+    the clues) rather than matching one target, so multi-solution puzzles
+    (any n_clues < 4 on 4x4) train fine."""
     out = []
-    attempts, max_attempts = 0, cfg.puzzles_per_batch * 200
-    while len(out) < cfg.puzzles_per_batch:
-        attempts += 1
-        if attempts > max_attempts:
-            raise RuntimeError(
-                f"made {len(out)}/{cfg.puzzles_per_batch} puzzles in {max_attempts} attempts; "
-                f"clue_counts {cfg.clue_counts} may not admit unique puzzles"
-            )
+    for _ in range(cfg.puzzles_per_batch):
         n_clues = int(rng.choice(cfg.clue_counts))
-        if n_clues == 0:
-            out.append(np.zeros(16, dtype=train_sols.dtype))
-            continue
-        sol = train_sols[rng.integers(len(train_sols))]
-        puz = make_puzzle(sol, n_clues, rng)
-        if puz is not None:
-            out.append(puz)
+        puz = np.zeros(CELLS, dtype=train_sols.dtype)
+        if n_clues:
+            sol = train_sols[rng.integers(len(train_sols))]
+            keep = rng.choice(CELLS, size=n_clues, replace=False)
+            puz[keep] = sol[keep]
+        out.append(puz)
     return np.stack(out)
 
 

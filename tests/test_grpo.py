@@ -32,3 +32,16 @@ def test_sample_puzzles_includes_empty():
     puzzles = sample_puzzles(train_sols, cfg, np.random.default_rng(0))
     assert puzzles.shape == (32, 16)
     assert any((p == 0).all() for p in puzzles)  # empty boards present
+
+
+def test_sample_puzzles_low_clue_counts():
+    # 1..3 clues never admit a unique 4x4 puzzle; generation must still work
+    # because the reward verifies boards instead of matching one solution
+    cfg = TRAININGS["grpo-smoke"].model_copy(
+        update={"puzzles_per_batch": 64, "clue_counts": (1, 2, 3)}
+    )
+    train_sols = all_solutions()[:100]
+    puzzles = sample_puzzles(train_sols, cfg, np.random.default_rng(0))
+    n_clues = (puzzles != 0).sum(axis=1)
+    assert set(n_clues.tolist()) == {1, 2, 3}
+    assert ((puzzles >= 0) & (puzzles <= 4)).all()  # clues are real digits

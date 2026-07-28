@@ -49,9 +49,17 @@ def main() -> None:
         puzzle = np.zeros(16, dtype=np.int64)
     else:
         _, eval_sols = orbit_split(np.random.default_rng(SPLIT_SEED))
-        puzzle = None
-        while puzzle is None:
-            puzzle = make_puzzle(eval_sols[rng.integers(len(eval_sols))], args.clues, rng)
+        if args.clues < 4:
+            # no unique puzzle exists below 4 clues; blank at random instead
+            # (solved() verifies the board, so any valid completion counts)
+            sol = eval_sols[rng.integers(len(eval_sols))]
+            puzzle = np.zeros(16, dtype=sol.dtype)
+            keep = rng.choice(16, size=args.clues, replace=False)
+            puzzle[keep] = sol[keep]
+        else:
+            puzzle = None
+            while puzzle is None:
+                puzzle = make_puzzle(eval_sols[rng.integers(len(eval_sols))], args.clues, rng)
 
     device = get_device()
     model = SudokuDenoiser(MODELS[args.model]).to(device)

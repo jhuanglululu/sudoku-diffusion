@@ -51,7 +51,9 @@ class GRPOConfig(BaseTrainingConfig):
     clip_eps: float = 0.2
     solved_bonus: float = 1.0
     efficiency_alpha: float = 0.5
-    clue_counts: tuple[int, ...] = (0, 4, 5, 6)  # 0 = start from an empty board
+    # 0 = start from an empty board; 1..3 have multiple solutions on 4x4,
+    # fine since the reward verifies the board instead of matching one target
+    clue_counts: tuple[int, ...] = (0, 1, 2, 3, 4, 5, 6)
 
 
 TrainingConfig = SFTConfig | GRPOConfig
