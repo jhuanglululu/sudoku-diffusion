@@ -33,7 +33,10 @@ class SFTConfig(BaseTrainingConfig):
     kind: Literal["sft"] = "sft"
     batch_size: int
     # corruption
-    mask_frac_range: tuple[float, float] = (0.0, 1.0)  # 1.0 => fully empty boards seen in SFT
+    mask_frac_range: tuple[float, float] = (
+        0.0,
+        1.0,
+    )  # 1.0 => fully empty boards seen in SFT
     wrong_frac_range: tuple[float, float] = (0.0, 0.3)
     consistency_weight: float = 1.0
 
@@ -47,7 +50,7 @@ class GRPOConfig(BaseTrainingConfig):
     # rollout temperature anneals linearly to this by the last step, so late
     # training samples near-greedy trajectories (stuck states included) while
     # keeping logprobs well-defined; must stay > 0
-    temperature_final: float = 0.3
+    temperature_final: float = 1.0
     clip_eps: float = 0.2
     solved_bonus: float = 1.0
     efficiency_alpha: float = 0.5
@@ -55,7 +58,7 @@ class GRPOConfig(BaseTrainingConfig):
     # fine since the reward verifies the board instead of matching one target.
     # 7-8 clues are deliberately held out of training: eval on them measures
     # generalization to unseen clue counts
-    clue_counts: tuple[int, ...] = (0, 1, 2, 3, 4, 5, 6)
+    clue_counts: tuple[int, ...] = (0, 4, 5, 6)
 
 
 TrainingConfig = SFTConfig | GRPOConfig
@@ -66,14 +69,32 @@ MODELS: dict[str, ModelConfig] = {
 }
 
 TRAININGS: dict[str, TrainingConfig] = {
-    "smoke": SFTConfig(name="smoke", steps=50, batch_size=32, lr=3e-4, warmup_steps=5, val_every=25),
-    "sft": SFTConfig(name="sft", steps=4000, batch_size=256, lr=1e-3, warmup_steps=100, val_every=200),
+    "smoke": SFTConfig(
+        name="smoke", steps=50, batch_size=32, lr=3e-4, warmup_steps=5, val_every=25
+    ),
+    "sft": SFTConfig(
+        name="sft", steps=4000, batch_size=256, lr=1e-3, warmup_steps=100, val_every=200
+    ),
     "grpo-smoke": GRPOConfig(
-        name="grpo-smoke", steps=10, lr=1e-5, warmup_steps=0,
-        init_from_training="smoke", group_size=4, puzzles_per_batch=4, log_every=1, val_every=5,
+        name="grpo-smoke",
+        steps=10,
+        lr=1e-5,
+        warmup_steps=0,
+        init_from_training="smoke",
+        group_size=4,
+        puzzles_per_batch=4,
+        log_every=1,
+        val_every=5,
     ),
     "grpo": GRPOConfig(
-        name="grpo", steps=500, lr=2e-5, warmup_steps=10,
-        init_from_training="sft", group_size=8, puzzles_per_batch=32, log_every=5, val_every=25,
+        name="grpo",
+        steps=500,
+        lr=2e-5,
+        warmup_steps=10,
+        init_from_training="sft",
+        group_size=8,
+        puzzles_per_batch=32,
+        log_every=5,
+        val_every=25,
     ),
 }
