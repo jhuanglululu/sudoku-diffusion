@@ -7,6 +7,11 @@ Each step, for every board:
   sampled): a digit commits the cell, MASK means "not decided yet". The
   model paces its own commits through the probability it leaves on MASK —
   there is no external commit schedule.
+A cell that was just remasked cannot re-commit the digit that was removed on
+the very next step (one-step ban) — this breaks the deterministic
+commit/remask 2-cycle, forcing the second-best digit or a wait instead. The
+ban is part of the action distribution, so rollouts record it and
+action_logprob renormalizes identically.
 Clue cells are frozen. A board terminates when it is full and no cell was
 changed in a step (stable), or at max_steps. Remasking can therefore revise a
 board even after it is completely filled.
@@ -33,9 +38,18 @@ class Rollout:
     remask_taken: list[torch.Tensor] = field(default_factory=list)  # bool (16,)
     mask_sites: list[torch.Tensor] = field(default_factory=list)    # bool (16,) cells masked before the step
     mask_tokens: list[torch.Tensor] = field(default_factory=list)   # long (16,) 5-way choice there; MASK = wait
+    mask_bans: list[torch.Tensor] = field(default_factory=list)     # long (16,) digit banned this step; 0 = none
     final_board: torch.Tensor | None = None
     steps_used: int = 0
     done: bool = False                   # stabilized (full and unchanged) within max_steps
+
+
+def _ban_logits(logits: torch.Tensor, banned: torch.Tensor) -> torch.Tensor:
+    """Exclude each cell's banned digit (0 = none; MASK is never banned)."""
+    ban_mask = torch.zeros_like(logits, dtype=torch.bool)
+    ban_mask.scatter_(-1, banned[..., None], True)
+    ban_mask[..., MASK] = False  # the 0 sentinel lands on the MASK column
+    return logits.masked_fill(ban_mask, float("-inf"))
 
 
 @torch.no_grad()
@@ -71,6 +85,9 @@ def sample(
     )
     # per-step batched records; sliced into per-board Rollout lists at the end
     rec: list[tuple[torch.Tensor, ...]] = []
+    # digit banned per cell for this step's 5-way choice (0 = none): a cell
+    # remasked at step t may not re-commit the removed digit at step t+1
+    banned = torch.zeros_like(boards)
 
     for step in range(max_steps):
         if not active.any():
@@ -90,21 +107,23 @@ def sample(
         boards[remask] = MASK
 
         # --- masked cells (from the pre-remask mask set): 5-way choice,
-        # a digit commits the cell, MASK waits
+        # a digit commits the cell, MASK waits; the banned digit is excluded
         masked = (prev == MASK) & active[:, None]
+        choice_logits = _ban_logits(logits, banned)
         if stochastic:
-            tprobs = torch.softmax(logits / max(temperature, 1e-6), dim=-1)
+            tprobs = torch.softmax(choice_logits / max(temperature, 1e-6), dim=-1)
             tok = torch.multinomial(
                 tprobs.reshape(-1, tprobs.shape[-1]), 1, generator=generator
             ).reshape(B, -1)
         else:
-            tok = logits.argmax(-1)
+            tok = choice_logits.argmax(-1)
         chosen_tok = torch.where(masked, tok, torch.zeros_like(boards))
         commit = masked & (chosen_tok != MASK)
         boards[commit] = chosen_tok[commit]
 
         if record:
-            rec.append((active.clone(), prev, filled, remask, masked, chosen_tok))
+            rec.append((active.clone(), prev, filled, remask, masked, chosen_tok, banned))
+        banned = torch.where(remask, prev, torch.zeros_like(prev))  # one step only
 
         # --- termination: full and unchanged
         stable = ((boards != MASK).all(-1)) & (boards == prev).all(-1) & active
@@ -119,7 +138,7 @@ def sample(
         act = torch.stack([a for a, *_ in rec]).cpu().tolist() if rec else []
         for b in range(B):
             r = rollouts[b]
-            for t, (_, prev, filled, remask, masked, chosen_tok) in enumerate(rec):
+            for t, (_, prev, filled, remask, masked, chosen_tok, bans) in enumerate(rec):
                 if not act[t][b]:
                     break  # once inactive, a board never records again
                 r.states.append(prev[b])
@@ -127,6 +146,7 @@ def sample(
                 r.remask_taken.append(remask[b])
                 r.mask_sites.append(masked[b])
                 r.mask_tokens.append(chosen_tok[b])
+                r.mask_bans.append(bans[b])
     for b in range(B):
         rollouts[b].final_board = boards[b].clone()
         rollouts[b].steps_used = int(steps_used[b])
@@ -141,13 +161,14 @@ def action_logprob(model: torch.nn.Module, rollouts: list[Rollout]) -> torch.Ten
     Fully batched: all recorded steps of all rollouts go through one forward
     and a handful of tensor ops, so the autograd graph stays small."""
     device = next(model.parameters()).device
-    states, sites, taken, msites, mtoks, owner, temps = [], [], [], [], [], [], []
+    states, sites, taken, msites, mtoks, mbans, owner, temps = [], [], [], [], [], [], [], []
     for i, r in enumerate(rollouts):
         states += r.states
         sites += r.remask_sites
         taken += r.remask_taken
         msites += r.mask_sites
         mtoks += r.mask_tokens
+        mbans += r.mask_bans
         owner += [i] * len(r.states)
         temps += [max(r.temperature, 1e-6)] * len(r.states)
     if not states:
@@ -156,6 +177,7 @@ def action_logprob(model: torch.nn.Module, rollouts: list[Rollout]) -> torch.Ten
     taken_t = torch.stack(taken).to(device)
     msites_t = torch.stack(msites).to(device)                     # (N, 16) bool
     mtoks_t = torch.stack(mtoks).to(device)                       # (N, 16) long
+    mbans_t = torch.stack(mbans).to(device)                       # (N, 16) long
     temp = torch.tensor(temps, device=device)[:, None, None]      # (N, 1, 1)
 
     logits = model(torch.stack(states).to(device))                # (N, 16, 5)
@@ -165,8 +187,9 @@ def action_logprob(model: torch.nn.Module, rollouts: list[Rollout]) -> torch.Ten
     keep = sites_t & ~taken_t
     per_state = (logp[..., MASK] * taken_t).sum(-1)
     per_state = per_state + (torch.log1p(-p_mask.clamp(max=1 - 1e-6)) * keep).sum(-1)
-    # masked cells: 5-way choice (MASK = wait) at the rollout's temperature
-    tlp = torch.log_softmax(logits / temp, dim=-1)                # (N, 16, 5)
+    # masked cells: 5-way choice (MASK = wait) at the rollout's temperature,
+    # renormalized over the non-banned tokens exactly as at rollout time
+    tlp = torch.log_softmax(_ban_logits(logits, mbans_t) / temp, dim=-1)  # (N, 16, 5)
     tok_lp = tlp.gather(-1, mtoks_t[..., None]).squeeze(-1)
     per_state = per_state + (tok_lp * msites_t).sum(-1)
 

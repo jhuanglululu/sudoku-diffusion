@@ -90,6 +90,34 @@ def test_done_when_stable_on_last_step():
     assert rolls[0].done  # stabilized exactly on the last step still counts
 
 
+class Regretful(torch.nn.Module):
+    """Prefers digit 3 for any cell (second choice 1) but wants to remask any
+    filled 3 — the deterministic commit/remask 2-cycle in miniature."""
+
+    def __init__(self):
+        super().__init__()
+        self.p = torch.nn.Parameter(torch.zeros(1))
+
+    def forward(self, tokens):
+        logits = torch.full((*tokens.shape, 5), -10.0)
+        logits[..., 3] = 5.0
+        logits[..., 1] = 2.0
+        logits[tokens == 3] = torch.tensor([10.0, -10.0, -10.0, -10.0, -10.0])
+        return logits + self.p * 0
+
+
+def test_ban_breaks_commit_remask_cycle():
+    # without the one-step ban this model loops 3 -> remask -> 3 forever;
+    # with it, the second-best digit 1 commits and the board stabilizes
+    puz = torch.zeros(1, 16, dtype=torch.long)
+    boards, steps, rolls, _ = sample(Regretful(), puz, max_steps=12, record=True)
+    assert (boards[0] == 1).all()
+    assert int(steps[0]) == 4  # commit 3s, remask all, commit 1s, confirm
+    r = rolls[0]
+    assert (r.mask_bans[2] == 3).all()  # every cell banned from re-committing 3
+    assert (r.mask_tokens[2] == 1).all()
+
+
 def test_recorded_actions_consistent():
     # stochastic rollout: recorded 5-way choices must be masked-site-only and
     # exactly explain which cells got committed
@@ -106,19 +134,27 @@ def test_recorded_actions_consistent():
         assert (r.mask_sites[t] == masked).all()
         assert (r.mask_tokens[t][~masked] == 0).all()
         committed = masked & (r.mask_tokens[t] != MASK)
+        assert (r.mask_tokens[t][r.mask_bans[t] > 0] != r.mask_bans[t][r.mask_bans[t] > 0]).all()
         if t + 1 < len(r.states):
             nxt = r.states[t + 1]
             assert (nxt[committed] == r.mask_tokens[t][committed]).all()
+            # a cell remasked at t carries a ban on the removed digit at t+1
+            remasked = r.remask_taken[t]
+            assert (r.mask_bans[t + 1][remasked] == r.states[t][remasked]).all()
 
 
 def _manual_logprob(logits, roll, temperature):
     logp = torch.log_softmax(logits, -1)
     p = logp.exp()
-    tlp = torch.log_softmax(logits / temperature, -1)
     total = 0.0
     for t in range(len(roll.states)):
         taken, keep = roll.remask_taken[t], roll.remask_sites[t] & ~roll.remask_taken[t]
         total += logp[taken, MASK].sum() + torch.log1p(-p[keep, MASK]).sum()
+        # 5-way choice renormalized over non-banned tokens, like the sampler
+        banned_logits = logits.clone()
+        bans = roll.mask_bans[t]
+        banned_logits[bans > 0, bans[bans > 0]] = float("-inf")
+        tlp = torch.log_softmax(banned_logits / temperature, -1)
         m = roll.mask_sites[t]
         if m.any():
             total += tlp[m].gather(1, roll.mask_tokens[t][m][:, None]).sum()
