@@ -73,7 +73,7 @@ TRAININGS: dict[str, TrainingConfig] = {
         name="smoke", steps=50, batch_size=32, lr=3e-4, warmup_steps=5, val_every=25
     ),
     "sft": SFTConfig(
-        name="sft", steps=4000, batch_size=256, lr=1e-3, warmup_steps=100, val_every=200
+        name="sft", steps=5000, batch_size=256, lr=1e-3, warmup_steps=100, val_every=200
     ),
     "grpo-smoke": GRPOConfig(
         name="grpo-smoke",
