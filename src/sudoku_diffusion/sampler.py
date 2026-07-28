@@ -3,8 +3,12 @@
 Each step, for every board:
 - filled non-clue cells may be *remasked*: greedy if argmax == MASK,
   stochastic with prob p(MASK);
-- masked cells: the top `commit_frac` most-confident get committed to a digit
-  (argmax, or temperature-sampled from the digit distribution).
+- masked cells get committed to a digit (argmax, or temperature-sampled from
+  the digit distribution), selected by one of two rules:
+  - top-k: the top `commit_frac` fraction of most-confident masked cells;
+  - confidence: every masked cell whose max digit probability reaches
+    `commit_threshold` (overrides top-k when set).
+  Either way at least one cell commits per step, so boards always progress.
 Clue cells are frozen. A board terminates when it is full and no cell was
 changed in a step (stable), or at max_steps. Remasking can therefore revise a
 board even after it is completely filled.
@@ -52,8 +56,13 @@ def sample(
     generator: torch.Generator | None = None,
     record: bool = False,
     track_trajectories: bool = False,
+    commit_threshold: float | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, list[Rollout], list[list[torch.Tensor]]]:
     """Run the sampler on a batch of puzzles (B, 16).
+
+    When commit_threshold is set, the confidence rule replaces top-k:
+    commit_frac is ignored and every masked cell at or above the threshold
+    commits (at least one per step regardless).
 
     Returns (final_boards, steps_used, rollouts, trajectories).
     `rollouts` is empty unless record=True; `trajectories` is empty unless
@@ -98,12 +107,17 @@ def sample(
         masked = (prev == MASK) & active[:, None]
         dprobs = _digit_probs(logits, temperature if stochastic else 1.0)
         conf = dprobs.max(-1).values.masked_fill(~masked, -1.0)
-        # per-board k = max(1, ceil(commit_frac * n_masked)), 0 if nothing masked;
-        # commit the cells whose confidence rank is below k. Non-masked cells sit
-        # at conf -1.0 < any probability, so ranks < n_masked are all masked cells.
-        # k in float64 so the ceil matches math.ceil at boundary values.
+        # per-board k committed cells, 0 if nothing masked; the k best-ranked by
+        # confidence commit. Non-masked cells sit at conf -1.0 < any probability,
+        # so ranks < n_masked are all masked cells.
+        # top-k rule: k = max(1, ceil(commit_frac * n_masked)), in float64 so the
+        # ceil matches math.ceil at boundary values.
+        # confidence rule: k = cells at/above commit_threshold, at least 1.
         n_masked = masked.sum(-1)
-        k = (n_masked.double() * commit_frac).ceil().long().clamp(min=1)
+        if commit_threshold is None:
+            k = (n_masked.double() * commit_frac).ceil().long().clamp(min=1)
+        else:
+            k = (conf >= commit_threshold).sum(-1).clamp(min=1)
         k = torch.where(n_masked > 0, k, torch.zeros_like(k))
         ranks = conf.argsort(-1, descending=True).argsort(-1)
         commit = ranks < k[:, None]

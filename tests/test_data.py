@@ -7,7 +7,6 @@ from sudoku_diffusion.data import (
     is_valid_solution,
     make_puzzle,
     orbit_split,
-    orbits,
     solved,
     symmetry_group,
     validity_score,

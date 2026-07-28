@@ -60,7 +60,7 @@ def main() -> None:
 
     boards, steps_used, _, trajs = sample(
         model, torch.from_numpy(puzzle)[None].long().to(device), cfg.max_sample_steps, cfg.commit_frac,
-        track_trajectories=True,
+        track_trajectories=True, commit_threshold=cfg.commit_threshold,
     )
     traj = [t.cpu().numpy() for t in trajs[0]]
     print(f"puzzle ({args.clues} clues):")

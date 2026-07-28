@@ -28,7 +28,8 @@ uv run scripts/train.py --model tiny --training grpo-smoke --seed 0
 
 # real runs
 uv run scripts/train.py --model base --training sft --seed 0
-uv run scripts/train.py --model base --training grpo --seed 0   # loads the sft checkpoint for the same model+seed
+uv run scripts/train.py --model base --training grpo-topk --seed 0        # loads the sft checkpoint for the same model+seed
+uv run scripts/train.py --model base --training grpo-confidence --seed 0  # confidence-rule committing (fewer sampler steps)
 
 # solve-rate eval on the fixed eval set
 uv run scripts/eval.py --model base --training sft --seed 0

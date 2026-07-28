@@ -33,7 +33,9 @@ def main() -> None:
 
     entries = load_eval_set(Path(__file__).resolve().parents[1] / "datasets" / "eval.jsonl")
     puzzles = torch.tensor([e["puzzle"] for e in entries], dtype=torch.long, device=device)
-    boards, steps_used, _, _ = sample(model, puzzles, cfg.max_sample_steps, cfg.commit_frac)
+    boards, steps_used, _, _ = sample(
+        model, puzzles, cfg.max_sample_steps, cfg.commit_frac, commit_threshold=cfg.commit_threshold
+    )
 
     by_clue: dict[int, list[tuple[bool, int]]] = {}
     for e, b, s in zip(entries, boards.cpu().numpy(), steps_used.cpu().numpy()):

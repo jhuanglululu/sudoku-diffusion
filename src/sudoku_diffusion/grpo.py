@@ -93,6 +93,7 @@ def train_grpo(model_name: str, training_name: str, seed: int) -> None:
         _, steps_used, rollouts, _ = sample(
             model, batch, cfg.max_sample_steps, cfg.commit_frac,
             temperature=cfg.temperature, generator=gen, record=True,
+            commit_threshold=cfg.commit_threshold,
         )
         rewards = torch.zeros(P * G)
         solves = 0

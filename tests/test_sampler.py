@@ -3,7 +3,7 @@ import math
 import torch
 
 from sudoku_diffusion.data import MASK
-from sudoku_diffusion.sampler import Rollout, _digit_probs, action_logprob, sample
+from sudoku_diffusion.sampler import _digit_probs, action_logprob, sample
 
 
 class Rigged(torch.nn.Module):
@@ -115,6 +115,41 @@ def test_commit_selection_is_topk_of_masked():
                 assert conf[commit].min() >= open_conf.max()
             checked += 1
     assert checked > 0
+
+
+def test_commit_threshold_commits_confident_cells():
+    # cells 0..3: near-1.0 confidence on digit 1; cells 4..15: uniform (0.25).
+    # 8 clues cover 8..15, so 0..7 start masked. With threshold 0.9, step 0
+    # must commit exactly the confident cells 0..3, then the fallback commits
+    # exactly one uniform cell per step until full.
+    logits = torch.full((16, 5), 0.0)
+    logits[:, MASK] = -10.0
+    logits[:4, 1] = 10.0
+    puz = torch.zeros(1, 16, dtype=torch.long)
+    puz[0, 8:] = torch.tensor([1, 2, 3, 4, 1, 2, 3, 4])
+    boards, steps, rolls, _ = sample(
+        Rigged(logits), puz, max_steps=8, commit_frac=0.35, record=True, commit_threshold=0.9
+    )
+    assert (boards != MASK).all() and steps[0] == 6  # 1 burst + 4 singles + 1 confirm
+    r = rolls[0]
+    for t in range(len(r.states)):
+        assert (r.commit_sites[t] & (r.states[t] != MASK)).sum() == 0  # masked-only
+    assert r.commit_sites[0].nonzero().flatten().tolist() == [0, 1, 2, 3]
+    for t in range(1, 5):
+        assert int(r.commit_sites[t].sum()) == 1
+        assert r.commit_sites[t][4:8].any()
+    assert not r.commit_sites[5].any()
+
+
+def test_commit_threshold_fills_in_one_step_when_all_confident():
+    logits = torch.full((16, 5), -10.0)
+    logits[:, 3] = 10.0
+    puz = torch.zeros(1, 16, dtype=torch.long)
+    boards, steps, _, _ = sample(
+        Rigged(logits), puz, max_steps=12, commit_frac=0.35, commit_threshold=0.9
+    )
+    assert (boards[0] == 3).all()
+    assert steps[0] == 2  # one full-board commit + one stability confirm
 
 
 def test_action_logprob_multiple_rollouts():
