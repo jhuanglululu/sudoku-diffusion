@@ -88,13 +88,13 @@ TRAININGS: dict[str, TrainingConfig] = {
     ),
     "grpo": GRPOConfig(
         name="grpo",
-        steps=500,
+        steps=2000,
         lr=2e-5,
         warmup_steps=10,
         init_from_training="sft",
-        group_size=8,
+        group_size=16,
         puzzles_per_batch=32,
-        log_every=5,
+        log_every=50,
         val_every=25,
     ),
 }
