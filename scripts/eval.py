@@ -9,7 +9,7 @@ import json
 import numpy as np
 import torch
 
-from sudoku_diffusion.data import SPLIT_SEED, orbit_split, random_puzzle, solved
+from sudoku_diffusion.data import MASK, SPLIT_SEED, orbit_split, random_puzzle, solved
 from sudoku_diffusion.model import SudokuDenoiser, get_device
 from sudoku_diffusion.runs import load_checkpoint, run_dir
 from sudoku_diffusion.sampler import sample
@@ -46,24 +46,44 @@ def main() -> None:
             sol = eval_sols[rng.integers(len(eval_sols))]
             entries.append((n_clues, random_puzzle(sol, n_clues, rng)))
     puzzles = torch.tensor(np.stack([p for _, p in entries]), dtype=torch.long, device=device)
-    boards, steps_used, _, _ = sample(model, puzzles, cfg.max_sample_steps)
+    boards, steps_used, rollouts, _ = sample(model, puzzles, cfg.max_sample_steps, record=True)
 
-    by_clue: dict[int, list[tuple[bool, int]]] = {}
-    for (n_clues, puz), b, s in zip(entries, boards.cpu().numpy(), steps_used.cpu().numpy()):
-        ok = solved(b, puz)
-        by_clue.setdefault(n_clues, []).append((ok, int(s)))
+    # failure modes: stable-invalid = model declared done (full and unchanged)
+    # on an invalid board; thrash = still flip-flopping at max_steps with a
+    # full board; stall = never filled the board (kept waiting)
+    def classify(ok: bool, done: bool, full: bool) -> str:
+        if ok:
+            return "solved"
+        if done:
+            return "stable_invalid"
+        return "thrash" if full else "stall"
+
+    by_clue: dict[int, list[tuple[str, int]]] = {}
+    for (n_clues, puz), b, s, r in zip(entries, boards.cpu().numpy(), steps_used.cpu().numpy(), rollouts):
+        cat = classify(solved(b, puz), r.done, bool((b != MASK).all()))
+        by_clue.setdefault(n_clues, []).append((cat, int(s)))
 
     total_ok, total = 0, 0
-    print(f"{'clues':>5} | {'n':>4} | {'solve%':>6} | mean steps (solved)")
+    fail_totals = {"stable_invalid": 0, "thrash": 0, "stall": 0}
+    print(f"{'clues':>5} | {'n':>4} | {'solve%':>6} | {'steps':>5} | {'st-inv':>6} | {'thrash':>6} | {'stall':>5}")
     for n_clues in sorted(by_clue):
         rs = by_clue[n_clues]
-        oks = [ok for ok, _ in rs]
-        steps = [s for ok, s in rs if ok]
+        oks = [cat == "solved" for cat, _ in rs]
+        steps = [s for cat, s in rs if cat == "solved"]
+        counts = {k: sum(cat == k for cat, _ in rs) for k in fail_totals}
+        for k, v in counts.items():
+            fail_totals[k] += v
         total_ok += sum(oks)
         total += len(rs)
         ms = f"{np.mean(steps):5.2f}" if steps else "    -"
-        print(f"{n_clues:>5} | {len(rs):>4} | {100 * np.mean(oks):6.1f} | {ms}")
-    print(f"{'all':>5} | {total:>4} | {100 * total_ok / total:6.1f} |")
+        print(
+            f"{n_clues:>5} | {len(rs):>4} | {100 * np.mean(oks):6.1f} | {ms} | "
+            f"{counts['stable_invalid']:>6} | {counts['thrash']:>6} | {counts['stall']:>5}"
+        )
+    print(
+        f"{'all':>5} | {total:>4} | {100 * total_ok / total:6.1f} | {'':>5} | "
+        f"{fail_totals['stable_invalid']:>6} | {fail_totals['thrash']:>6} | {fail_totals['stall']:>5}"
+    )
 
     rec = run_dir("records", args.model, args.training, args.seed) / "record.jsonl"
     with rec.open("a") as f:
@@ -71,7 +91,11 @@ def main() -> None:
             "type": "eval", "step": meta.get("step"), "checkpoint": meta["checkpoint"],
             "puzzle_seed": args.puzzle_seed, "n_per_clue": args.n,
             "eval_solve_rate": round(total_ok / total, 4),
-            "per_clue": {str(k): round(float(np.mean([ok for ok, _ in v])), 4) for k, v in by_clue.items()},
+            "per_clue": {
+                str(k): round(float(np.mean([cat == "solved" for cat, _ in v])), 4)
+                for k, v in by_clue.items()
+            },
+            "failures": fail_totals,
         }) + "\n")
 
 
