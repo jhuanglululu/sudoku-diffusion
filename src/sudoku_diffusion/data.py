@@ -137,6 +137,14 @@ def orbit_split(rng: np.random.Generator, eval_fraction: float = 1 / 6) -> tuple
 
 
 # ------------------------------------------------------------------- puzzles
+def scrambled_board(rng: np.random.Generator) -> np.ndarray:
+    """Fully filled board of random digits from a random 1-4 digit alphabet
+    (single-digit alphabets happen: e.g. sixteen 4s). A clue-free start the
+    sampler must repair by remasking."""
+    alphabet = rng.choice(np.arange(1, 5, dtype=np.int64), size=int(rng.integers(1, 5)), replace=False)
+    return rng.choice(alphabet, size=CELLS)
+
+
 def random_puzzle(solution: np.ndarray, n_clues: int, rng: np.random.Generator) -> np.ndarray:
     """Keep n_clues random cells of a solution. No uniqueness guarantee
     (below 4 clues no unique 4x4 puzzle exists) — fine wherever the outcome

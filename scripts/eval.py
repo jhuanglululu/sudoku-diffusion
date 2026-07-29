@@ -9,13 +9,14 @@ import json
 import numpy as np
 import torch
 
-from sudoku_diffusion.data import MASK, SPLIT_SEED, orbit_split, random_puzzle, solved
+from sudoku_diffusion.data import MASK, SPLIT_SEED, orbit_split, random_puzzle, scrambled_board, solved
 from sudoku_diffusion.model import SudokuDenoiser, get_device
 from sudoku_diffusion.runs import load_checkpoint, run_dir
 from sudoku_diffusion.sampler import sample
 from sudoku_diffusion.variations import MODELS, TRAININGS
 
 CLUE_COUNTS = (0, 1, 2, 3, 4, 5, 6, 7, 8)
+SCRAM = -1  # row label for scrambled full-board starts
 
 
 def main() -> None:
@@ -36,20 +37,24 @@ def main() -> None:
 
     rng = np.random.default_rng(args.puzzle_seed)
     _, eval_sols = orbit_split(np.random.default_rng(SPLIT_SEED))
-    entries: list[tuple[int, np.ndarray]] = []
+    entries: list[tuple[int, np.ndarray, np.ndarray]] = []  # (key, puzzle, init)
     for n_clues in CLUE_COUNTS:
         if n_clues == 0:
-            # greedy sampling is deterministic, one empty board is enough
-            entries.append((0, np.zeros(16, dtype=eval_sols.dtype)))
+            empty = np.zeros(16, dtype=eval_sols.dtype)
+            entries.append((0, empty, empty))
             continue
         for _ in range(args.n):
             sol = eval_sols[rng.integers(len(eval_sols))]
-            entries.append((n_clues, random_puzzle(sol, n_clues, rng)))
-    puzzles = torch.tensor(np.stack([p for _, p in entries]), dtype=torch.long, device=device)
+            puz = random_puzzle(sol, n_clues, rng)
+            entries.append((n_clues, puz, puz))
+    for _ in range(args.n):  # clue-free scrambled starts: repair from garbage
+        entries.append((SCRAM, np.zeros(16, dtype=eval_sols.dtype), scrambled_board(rng)))
+    puzzles = torch.tensor(np.stack([p for _, p, _ in entries]), dtype=torch.long, device=device)
+    inits = torch.tensor(np.stack([i for _, _, i in entries]), dtype=torch.long, device=device)
     gen = torch.Generator(device=device).manual_seed(args.puzzle_seed)
     boards, steps_used, rollouts, _ = sample(
         model, puzzles, cfg.max_sample_steps, record=True,
-        warmup_steps=cfg.sample_warmup_steps, generator=gen,
+        warmup_steps=cfg.sample_warmup_steps, generator=gen, init_boards=inits,
     )
 
     # failure modes: stable-invalid = model declared done (full and unchanged)
@@ -63,15 +68,15 @@ def main() -> None:
         return "thrash" if full else "stall"
 
     by_clue: dict[int, list[tuple[str, int]]] = {}
-    for (n_clues, puz), b, s, r in zip(entries, boards.cpu().numpy(), steps_used.cpu().numpy(), rollouts):
+    for (key, puz, _), b, s, r in zip(entries, boards.cpu().numpy(), steps_used.cpu().numpy(), rollouts):
         cat = classify(solved(b, puz), r.done, bool((b != MASK).all()))
-        by_clue.setdefault(n_clues, []).append((cat, int(s)))
+        by_clue.setdefault(key, []).append((cat, int(s)))
 
     total_ok, total = 0, 0
     fail_totals = {"stable_invalid": 0, "thrash": 0, "stall": 0}
     print(f"{'clues':>5} | {'n':>4} | {'solve%':>6} | {'steps':>5} | {'st-inv':>6} | {'thrash':>6} | {'stall':>5}")
-    for n_clues in sorted(by_clue):
-        rs = by_clue[n_clues]
+    for key in sorted(by_clue, key=lambda k: (k == SCRAM, k)):  # scram row last
+        rs = by_clue[key]
         oks = [cat == "solved" for cat, _ in rs]
         steps = [s for cat, s in rs if cat == "solved"]
         counts = {k: sum(cat == k for cat, _ in rs) for k in fail_totals}
@@ -80,8 +85,9 @@ def main() -> None:
         total_ok += sum(oks)
         total += len(rs)
         ms = f"{np.mean(steps):5.2f}" if steps else "    -"
+        label = "scram" if key == SCRAM else str(key)
         print(
-            f"{n_clues:>5} | {len(rs):>4} | {100 * np.mean(oks):6.1f} | {ms} | "
+            f"{label:>5} | {len(rs):>4} | {100 * np.mean(oks):6.1f} | {ms} | "
             f"{counts['stable_invalid']:>6} | {counts['thrash']:>6} | {counts['stall']:>5}"
         )
     print(
@@ -96,7 +102,7 @@ def main() -> None:
             "puzzle_seed": args.puzzle_seed, "n_per_clue": args.n,
             "eval_solve_rate": round(total_ok / total, 4),
             "per_clue": {
-                str(k): round(float(np.mean([cat == "solved" for cat, _ in v])), 4)
+                ("scram" if k == SCRAM else str(k)): round(float(np.mean([cat == "solved" for cat, _ in v])), 4)
                 for k, v in by_clue.items()
             },
             "failures": fail_totals,

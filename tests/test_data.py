@@ -7,10 +7,21 @@ from sudoku_diffusion.data import (
     is_valid_solution,
     make_puzzle,
     orbit_split,
+    scrambled_board,
     solved,
     symmetry_group,
     validity_score,
 )
+
+
+def test_scrambled_board():
+    rng = np.random.default_rng(0)
+    boards = [scrambled_board(rng) for _ in range(64)]
+    for b in boards:
+        assert b.shape == (16,)
+        assert ((b >= 1) & (b <= 4)).all()  # fully filled, no MASK
+    assert any(len(np.unique(b)) == 1 for b in boards)  # e.g. sixteen 4s
+    assert any(len(np.unique(b)) > 1 for b in boards)
 
 
 def test_all_solutions_count_and_validity():

@@ -23,7 +23,7 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-from .data import CELLS, SPLIT_SEED, orbit_split, random_puzzle, solved, validity_score
+from .data import CELLS, SPLIT_SEED, orbit_split, random_puzzle, scrambled_board, solved, validity_score
 from .model import SudokuDenoiser, get_device
 from .runs import Record, load_checkpoint, save_checkpoint, seed_all
 from .sampler import action_logprob, sample
@@ -64,9 +64,8 @@ def sample_puzzles(
     puzzles, inits = [], []
     for _ in range(cfg.puzzles_per_batch):
         if rng.random() < cfg.scramble_frac:
-            alphabet = rng.choice(np.arange(1, 5), size=int(rng.integers(1, 5)), replace=False)
             puzzles.append(np.zeros(CELLS, dtype=train_sols.dtype))
-            inits.append(rng.choice(alphabet, size=CELLS).astype(train_sols.dtype))
+            inits.append(scrambled_board(rng).astype(train_sols.dtype))
         else:
             n_clues = int(rng.choice(cfg.clue_counts))
             sol = train_sols[rng.integers(len(train_sols))]

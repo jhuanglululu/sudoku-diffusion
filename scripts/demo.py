@@ -2,6 +2,8 @@
 
 uv run scripts/demo.py --model tiny --training smoke --seed 0 [--clues 5]
 --clues 0 starts from a completely empty board.
+--scramble starts from a clue-free fully filled random board instead
+(the model must remask its way to any valid grid).
 """
 
 import argparse
@@ -9,7 +11,7 @@ import argparse
 import numpy as np
 import torch
 
-from sudoku_diffusion.data import MASK, SPLIT_SEED, make_puzzle, orbit_split, random_puzzle, solved
+from sudoku_diffusion.data import MASK, SPLIT_SEED, make_puzzle, orbit_split, random_puzzle, scrambled_board, solved
 from sudoku_diffusion.model import SudokuDenoiser, get_device
 from sudoku_diffusion.runs import load_checkpoint
 from sudoku_diffusion.sampler import sample
@@ -40,12 +42,17 @@ def main() -> None:
     ap.add_argument("--training", required=True, choices=sorted(TRAININGS))
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--clues", type=int, default=5)
+    ap.add_argument("--scramble", action="store_true", help="start from a clue-free random full board")
     ap.add_argument("--puzzle-seed", type=int, default=0)
     args = ap.parse_args()
     cfg = TRAININGS[args.training]
 
     rng = np.random.default_rng(args.puzzle_seed)
-    if args.clues == 0:
+    init = None
+    if args.scramble:
+        puzzle = np.zeros(16, dtype=np.int64)
+        init = scrambled_board(rng)
+    elif args.clues == 0:
         puzzle = np.zeros(16, dtype=np.int64)
     else:
         _, eval_sols = orbit_split(np.random.default_rng(SPLIT_SEED))
@@ -64,12 +71,14 @@ def main() -> None:
     model.eval()
 
     gen = torch.Generator(device=device).manual_seed(args.puzzle_seed)
+    init_b = None if init is None else torch.from_numpy(init)[None].long().to(device)
     boards, steps_used, _, trajs = sample(
         model, torch.from_numpy(puzzle)[None].long().to(device), cfg.max_sample_steps,
         track_trajectories=True, warmup_steps=cfg.sample_warmup_steps, generator=gen,
+        init_boards=init_b,
     )
     traj = [t.cpu().numpy() for t in trajs[0]]
-    print(f"puzzle ({args.clues} clues):")
+    print("scrambled start (no clues):" if args.scramble else f"puzzle ({args.clues} clues):")
     for i, b in enumerate(traj):
         label = "start" if i == 0 else f"step {i}"
         print(f"\n--- {label} ---")
