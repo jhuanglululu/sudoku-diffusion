@@ -46,7 +46,10 @@ uv run pytest
 
 **Model**
 - tiny — smoke runs and shape checks, never real results
-- base — the main experiment scale (<1M params)
+- base — encoder transformer, the main experiment scale (~3.6M params)
+- unit — GNN-style message passing on the constraint graph (unit-masked
+  attention + typed peer sums + channel MLP), no positional embeddings,
+  exactly equivariant under the symmetry group; same scale as base
 
 **Training**
 - smoke — 50-step local SFT sanity check

@@ -16,6 +16,12 @@ class ModelConfig(BaseModel):
     vocab_size: int = 5
     seq_len: int = 16
     dropout: float = 0.0
+    # "transformer": full attention + learned positional embeddings.
+    # "unit": GNN-style block (unit-masked attention -> unit-masked mix ->
+    # channel MLP), no positional embeddings — exactly equivariant under the
+    # geometric symmetry group; greedy sampling relies on the stochastic
+    # warmup to break ties on symmetric boards
+    arch: Literal["transformer", "unit"] = "transformer"
 
 
 class BaseTrainingConfig(BaseModel):
@@ -75,6 +81,8 @@ TrainingConfig = SFTConfig | GRPOConfig
 MODELS: dict[str, ModelConfig] = {
     "tiny": ModelConfig(name="tiny", d_model=32, n_layers=2, n_heads=2, d_ff=64),
     "base": ModelConfig(name="base", d_model=192, n_layers=8, n_heads=4, d_ff=768),
+    # same scale as base for a head-to-head architecture comparison
+    "unit": ModelConfig(name="unit", d_model=192, n_layers=8, n_heads=4, d_ff=768, arch="unit"),
 }
 
 TRAININGS: dict[str, TrainingConfig] = {
