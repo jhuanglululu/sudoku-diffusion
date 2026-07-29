@@ -1,7 +1,8 @@
 """GRPO on sampler trajectories, initialized from an SFT checkpoint.
 
 Per step: sample `puzzles_per_batch` puzzles from train-orbit solutions
-(clue counts from clue_counts; 0 = empty board), roll out `group_size`
+(clue counts from clue_counts; 0 = empty board; scramble_frac of them are
+clue-free scrambled full-board starts), roll out `group_size`
 stochastic trajectories per puzzle at a temperature annealed linearly from
 `temperature` to `temperature_final` over the run (late training samples
 near-greedy trajectories, closing the train/eval gap), reward each final
@@ -22,7 +23,7 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-from .data import SPLIT_SEED, orbit_split, random_puzzle, solved, validity_score
+from .data import CELLS, SPLIT_SEED, orbit_split, random_puzzle, solved, validity_score
 from .model import SudokuDenoiser, get_device
 from .runs import Record, load_checkpoint, save_checkpoint, seed_all
 from .sampler import action_logprob, sample
@@ -50,17 +51,29 @@ def group_advantages(rewards: torch.Tensor) -> torch.Tensor:
     return (rewards - mean) / (std + 1e-4)
 
 
-def sample_puzzles(train_sols: np.ndarray, cfg: GRPOConfig, rng: np.random.Generator) -> np.ndarray:
-    """Blank random cells of a train solution down to n_clues. No uniqueness
-    requirement — the reward verifies the final board (valid + consistent with
-    the clues) rather than matching one target, so multi-solution puzzles
-    (any n_clues < 4 on 4x4) train fine."""
-    out = []
+def sample_puzzles(
+    train_sols: np.ndarray, cfg: GRPOConfig, rng: np.random.Generator
+) -> tuple[np.ndarray, np.ndarray]:
+    """Returns (puzzles, init_boards), both (P, 16). A regular puzzle blanks
+    random cells of a train solution down to n_clues (no uniqueness
+    requirement — the reward verifies the final board rather than matching
+    one target) and the sampler starts from it. With probability
+    scramble_frac an entry is a scrambled start instead: no clues, and the
+    init board is fully filled with random digits from a random 1-4 digit
+    alphabet (sixteen 4s happens), forcing remask/repair from garbage."""
+    puzzles, inits = [], []
     for _ in range(cfg.puzzles_per_batch):
-        n_clues = int(rng.choice(cfg.clue_counts))
-        sol = train_sols[rng.integers(len(train_sols))]
-        out.append(random_puzzle(sol, n_clues, rng))
-    return np.stack(out)
+        if rng.random() < cfg.scramble_frac:
+            alphabet = rng.choice(np.arange(1, 5), size=int(rng.integers(1, 5)), replace=False)
+            puzzles.append(np.zeros(CELLS, dtype=train_sols.dtype))
+            inits.append(rng.choice(alphabet, size=CELLS).astype(train_sols.dtype))
+        else:
+            n_clues = int(rng.choice(cfg.clue_counts))
+            sol = train_sols[rng.integers(len(train_sols))]
+            puz = random_puzzle(sol, n_clues, rng)
+            puzzles.append(puz)
+            inits.append(puz)
+    return np.stack(puzzles), np.stack(inits)
 
 
 def train_grpo(model_name: str, training_name: str, seed: int) -> None:
@@ -89,12 +102,13 @@ def train_grpo(model_name: str, training_name: str, seed: int) -> None:
     bar = tqdm(range(cfg.steps), desc=f"{model_name}/{training_name} e0")
     t0 = time.time()
     for step in bar:
-        puzzles = sample_puzzles(train_sols, cfg, rng)
+        puzzles, inits = sample_puzzles(train_sols, cfg, rng)
         batch = torch.from_numpy(np.repeat(puzzles, G, axis=0)).long().to(device)  # (P*G, 16)
+        init_b = torch.from_numpy(np.repeat(inits, G, axis=0)).long().to(device)
         temp = rollout_temperature(cfg, step)
         _, steps_used, rollouts, _ = sample(
             model, batch, cfg.max_sample_steps,
-            temperature=temp, generator=gen, record=True,
+            temperature=temp, generator=gen, record=True, init_boards=init_b,
         )
         rewards = torch.zeros(P * G)
         solves = 0

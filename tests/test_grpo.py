@@ -35,22 +35,27 @@ def test_rollout_temperature_anneals_linearly():
     assert rollout_temperature(one, 0) == 1.0  # no divide-by-zero on 1-step runs
 
 
-def test_sample_puzzles_includes_empty():
-    cfg = TRAININGS["grpo-smoke"].model_copy(update={"puzzles_per_batch": 32})
-    train_sols = all_solutions()[:100]
-    puzzles = sample_puzzles(train_sols, cfg, np.random.default_rng(0))
-    assert puzzles.shape == (32, 16)
-    assert any((p == 0).all() for p in puzzles)  # empty boards present
-
-
 def test_sample_puzzles_low_clue_counts():
     # 1..3 clues never admit a unique 4x4 puzzle; generation must still work
     # because the reward verifies boards instead of matching one solution
     cfg = TRAININGS["grpo-smoke"].model_copy(
-        update={"puzzles_per_batch": 64, "clue_counts": (1, 2, 3)}
+        update={"puzzles_per_batch": 64, "clue_counts": (1, 2, 3), "scramble_frac": 0.0}
     )
     train_sols = all_solutions()[:100]
-    puzzles = sample_puzzles(train_sols, cfg, np.random.default_rng(0))
+    puzzles, inits = sample_puzzles(train_sols, cfg, np.random.default_rng(0))
+    assert (puzzles == inits).all()  # regular puzzles start from themselves
     n_clues = (puzzles != 0).sum(axis=1)
     assert set(n_clues.tolist()) == {1, 2, 3}
     assert ((puzzles >= 0) & (puzzles <= 4)).all()  # clues are real digits
+
+
+def test_sample_puzzles_scrambled_starts():
+    cfg = TRAININGS["grpo-smoke"].model_copy(
+        update={"puzzles_per_batch": 64, "scramble_frac": 1.0}
+    )
+    train_sols = all_solutions()[:100]
+    puzzles, inits = sample_puzzles(train_sols, cfg, np.random.default_rng(0))
+    assert (puzzles == 0).all()  # scrambled starts carry no clues
+    assert (inits != 0).all() and ((inits >= 1) & (inits <= 4)).all()  # fully filled
+    assert any(len(np.unique(i)) == 1 for i in inits)  # e.g. sixteen 4s
+    assert any(len(np.unique(i)) > 1 for i in inits)

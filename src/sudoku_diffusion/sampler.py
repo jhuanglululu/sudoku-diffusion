@@ -61,8 +61,17 @@ def sample(
     generator: torch.Generator | None = None,
     record: bool = False,
     track_trajectories: bool = False,
+    warmup_steps: int = 0,
+    init_boards: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, list[Rollout], list[list[torch.Tensor]]]:
     """Run the sampler on a batch of puzzles (B, 16).
+
+    In greedy mode (temperature == 0) the first `warmup_steps` steps still
+    sample stochastically at temperature 1.0: a deterministic equivariant
+    model cannot break ties on symmetric boards (e.g. the empty board).
+    Ignored when temperature > 0. `init_boards` overrides the starting board
+    state (clues still come from `puzzles`; other filled cells are free to be
+    remasked) — used for scrambled full-board starts.
 
     Returns (final_boards, steps_used, rollouts, trajectories).
     `rollouts` is empty unless record=True; `trajectories` is empty unless
@@ -70,7 +79,7 @@ def sample(
     states of puzzle b including the final board (for the demo).
     """
     device = puzzles.device
-    boards = puzzles.clone()
+    boards = (puzzles if init_boards is None else init_boards).clone()
     clue = puzzles != MASK
     B = boards.shape[0]
     stochastic = temperature > 0
@@ -95,11 +104,13 @@ def sample(
         logits = model(boards)
         probs = torch.softmax(logits, dim=-1)
         prev = boards.clone()
+        stoch = stochastic or step < warmup_steps
+        step_temp = temperature if stochastic else 1.0
 
         # --- remask filled non-clue cells
         filled = (boards != MASK) & ~clue & active[:, None]
         p_mask = probs[..., MASK]
-        if stochastic:
+        if stoch:
             u = torch.rand(p_mask.shape, device=device, generator=generator)
             remask = filled & (u < p_mask)
         else:
@@ -110,8 +121,8 @@ def sample(
         # a digit commits the cell, MASK waits; the banned digit is excluded
         masked = (prev == MASK) & active[:, None]
         choice_logits = _ban_logits(logits, banned)
-        if stochastic:
-            tprobs = torch.softmax(choice_logits / max(temperature, 1e-6), dim=-1)
+        if stoch:
+            tprobs = torch.softmax(choice_logits / max(step_temp, 1e-6), dim=-1)
             tok = torch.multinomial(
                 tprobs.reshape(-1, tprobs.shape[-1]), 1, generator=generator
             ).reshape(B, -1)

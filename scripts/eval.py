@@ -46,7 +46,11 @@ def main() -> None:
             sol = eval_sols[rng.integers(len(eval_sols))]
             entries.append((n_clues, random_puzzle(sol, n_clues, rng)))
     puzzles = torch.tensor(np.stack([p for _, p in entries]), dtype=torch.long, device=device)
-    boards, steps_used, rollouts, _ = sample(model, puzzles, cfg.max_sample_steps, record=True)
+    gen = torch.Generator(device=device).manual_seed(args.puzzle_seed)
+    boards, steps_used, rollouts, _ = sample(
+        model, puzzles, cfg.max_sample_steps, record=True,
+        warmup_steps=cfg.sample_warmup_steps, generator=gen,
+    )
 
     # failure modes: stable-invalid = model declared done (full and unchanged)
     # on an invalid board; thrash = still flip-flopping at max_steps with a

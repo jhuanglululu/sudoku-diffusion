@@ -118,6 +118,30 @@ def test_ban_breaks_commit_remask_cycle():
     assert (r.mask_tokens[2] == 1).all()
 
 
+def test_warmup_sampling_breaks_symmetry():
+    # uniform digit logits: greedy argmax commits the same digit to every
+    # cell (an equivariant model on the empty board); a stochastic warmup
+    # step must produce a mixed board instead
+    logits = torch.zeros(16, 5)
+    logits[:, MASK] = -10.0
+    puz = torch.zeros(1, 16, dtype=torch.long)
+    boards, _, _, _ = sample(Rigged(logits), puz, max_steps=1)
+    assert len(set(boards[0].tolist())) == 1  # greedy: all cells identical
+    gen = torch.Generator().manual_seed(0)
+    boards, _, _, _ = sample(Rigged(logits), puz, max_steps=1, warmup_steps=1, generator=gen)
+    assert len(set(boards[0].tolist())) > 1
+
+
+def test_init_boards_scrambled_start():
+    # start fully filled with 3s and no clues: Regretful remasks them all,
+    # the ban forces its second choice, and the board stabilizes on 1s
+    puz = torch.zeros(1, 16, dtype=torch.long)
+    init = torch.full((1, 16), 3, dtype=torch.long)
+    boards, steps, _, _ = sample(Regretful(), puz, max_steps=6, init_boards=init)
+    assert (boards[0] == 1).all()
+    assert int(steps[0]) == 3  # remask all, commit 1s, confirm
+
+
 def test_recorded_actions_consistent():
     # stochastic rollout: recorded 5-way choices must be masked-site-only and
     # exactly explain which cells got committed

@@ -27,6 +27,10 @@ class BaseTrainingConfig(BaseModel):
     val_every: int = 50
     # sampler (used by eval/demo for both kinds)
     max_sample_steps: int = 12
+    # greedy sampling runs the first N steps stochastically (temperature 1.0):
+    # a deterministic equivariant model cannot break ties on symmetric boards
+    # (e.g. the empty board), so greedy needs a stochastic kick-off
+    sample_warmup_steps: int = 2
 
 
 class SFTConfig(BaseTrainingConfig):
@@ -54,6 +58,11 @@ class GRPOConfig(BaseTrainingConfig):
     clip_eps: float = 0.2
     solved_bonus: float = 1.0
     efficiency_alpha: float = 0.5
+    # fraction of training puzzles that are scrambled starts: no clues, and
+    # the sampler starts from a fully filled board of random digits drawn
+    # from a random 1-4 digit alphabet (sixteen 4s happens) — pushes hard on
+    # remask/repair
+    scramble_frac: float = 0.25
     # 0 = start from an empty board; 1..3 have multiple solutions on 4x4,
     # fine since the reward verifies the board instead of matching one target.
     # 7-8 clues are deliberately held out of training: eval on them measures

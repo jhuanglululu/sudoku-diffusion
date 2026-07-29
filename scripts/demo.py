@@ -63,9 +63,10 @@ def main() -> None:
     load_checkpoint(model, args.model, args.training, args.seed, which="current")
     model.eval()
 
+    gen = torch.Generator(device=device).manual_seed(args.puzzle_seed)
     boards, steps_used, _, trajs = sample(
         model, torch.from_numpy(puzzle)[None].long().to(device), cfg.max_sample_steps,
-        track_trajectories=True,
+        track_trajectories=True, warmup_steps=cfg.sample_warmup_steps, generator=gen,
     )
     traj = [t.cpu().numpy() for t in trajs[0]]
     print(f"puzzle ({args.clues} clues):")
